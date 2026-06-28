@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Finishing connection…</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+</head>
+<body>
+  <header>
+    <h1>🔗 Finishing connection…</h1>
+    <p class="tagline" id="msg">Securely returning from your bank — one moment.</p>
+  </header>
+
+  <script>
+    // This page is the OAuth redirect target. The bank sent the user back here
+    // with an oauth_state_id in the URL. We resume the SAME Link session using
+    // the link_token we stashed before redirecting, then hand the result back
+    // to the main app.
+    (function () {
+      const token = localStorage.getItem('plaidLinkToken');
+      const owner = localStorage.getItem('plaidOwner') || 'Me';
+
+      if (!token) {
+        document.getElementById('msg').textContent =
+          'Session expired. Returning you to start over…';
+        return void setTimeout(() => (location.href = '/'), 1500);
+      }
+
+      const handler = Plaid.create({
+        token,
+        receivedRedirectUri: window.location.href,
+        onSuccess: async (public_token) => {
+          localStorage.removeItem('plaidLinkToken');
+          localStorage.removeItem('plaidOwner');
+          try {
+            await fetch('/api/exchange_public_token', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ public_token, owner }),
+            });
+          } catch (e) { /* surfaced on the main page */ }
+          location.href = '/';
+        },
+        onEvent: (eventName, meta) => {
+          if (eventName === 'ERROR') console.error('Plaid Link ERROR event:', meta);
+        },
+        onExit: (err, meta) => {
+          localStorage.removeItem('plaidLinkToken');
+          localStorage.removeItem('plaidOwner');
+          if (err) {
+            console.error('Plaid Link exit error:', err, meta);
+            alert(
+              'Plaid connection failed.\n\n' +
+              'Code: ' + (err.error_code || '(none)') + '\n' +
+              'Type: ' + (err.error_type || '(none)') + '\n' +
+              'Message: ' + (err.display_message || err.error_message || '(none)') + '\n' +
+              'Institution: ' + ((meta && meta.institution && meta.institution.name) || '(none)') + '\n' +
+              'Request ID: ' + ((meta && meta.request_id) || '(none)')
+            );
+          }
+          location.href = '/';
+        },
+      });
+      handler.open();
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Debt-Free — your payoff plan</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+</head>
+<body>
+  <header>
+    <h1>💸 Debt-Free</h1>
+    <p class="tagline">Connect your accounts, see every debt, and find the fastest way out.</p>
+  </header>
+
+  <main>
+    <!-- Connect / data sources -->
+    <section class="card">
+      <div class="row spread">
+        <h2>Your debts</h2>
+        <div class="actions">
+          <button id="connectBtn" class="primary">🔗 Connect a login</button>
+          <button id="refreshBtn" class="ghost" title="Re-pull balances from linked banks">↻ Refresh</button>
+          <button id="addManualBtn" class="ghost">＋ Add manually</button>
+        </div>
+      </div>
+      <div id="setupBanner" hidden></div>
+      <p id="plaidStatus" class="muted small"></p>
+      <p class="muted small">Connect as many logins as you need — yours, your wife's, and joint accounts (even two logins at the same bank). Tag each with whose it is. Manual entry is available as a backup.</p>
+      <div id="debtList" class="debt-list"></div>
+      <p id="emptyState" class="muted">No debts yet. Connect a bank or add one manually to get started.</p>
+    </section>
+
+    <!-- Plan controls -->
+    <section class="card">
+      <h2>Build your plan</h2>
+      <div class="controls">
+        <label>
+          Strategy
+          <select id="strategy">
+            <option value="avalanche">Avalanche — pay highest interest first (saves the most money)</option>
+            <option value="snowball">Snowball — pay smallest balance first (quick wins)</option>
+          </select>
+        </label>
+        <label>
+          Extra per month (on top of minimums)
+          <div class="input-prefix">
+            <span>$</span>
+            <input type="number" id="extra" min="0" step="25" value="100" />
+          </div>
+        </label>
+      </div>
+    </section>
+
+    <!-- Results -->
+    <section class="card" id="resultsCard" hidden>
+      <h2>Your plan</h2>
+      <div class="stats" id="stats"></div>
+      <div class="compare" id="compare"></div>
+      <details>
+        <summary>Month-by-month payoff order</summary>
+        <div id="schedule" class="schedule"></div>
+      </details>
+    </section>
+
+    <!-- Analytics -->
+    <section class="card" id="analyticsCard" hidden>
+      <h2>📊 Analytics</h2>
+
+      <div class="analytics-grid">
+        <div class="chart-box wide">
+          <h3>Your real progress</h3>
+          <p class="muted small">Your actual total debt each time you update balances. This is the one that counts.</p>
+          <div id="progressChart"></div>
+        </div>
+
+        <div class="chart-box">
+          <h3>Balance over time (projected)</h3>
+          <p class="muted small">How fast your total debt falls with your plan vs. paying minimums only.</p>
+          <div id="balanceChart"></div>
+        </div>
+
+        <div class="chart-box">
+          <h3>Where every dollar goes</h3>
+          <p class="muted small">Of everything you'll pay, how much is principal vs. interest.</p>
+          <div id="principalChart"></div>
+        </div>
+
+        <div class="chart-box">
+          <h3>Debt by person</h3>
+          <p class="muted small">Each person's share of the balance, and their debt-free date.</p>
+          <div id="ownerChart"></div>
+        </div>
+
+        <div class="chart-box">
+          <h3>Interest you're paying right now</h3>
+          <p class="muted small">What this debt costs you every month before you pay a cent of principal.</p>
+          <div id="burnChart"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Manual-entry / edit modal -->
+  <dialog id="debtDialog">
+    <form method="dialog" id="debtForm">
+      <h3 id="dialogTitle">Add a debt</h3>
+      <label>Whose debt? <input name="owner" list="ownerOptions" placeholder="e.g. Me, Wife, Joint" /></label>
+      <datalist id="ownerOptions"></datalist>
+      <label>Name <input name="name" required placeholder="e.g. Visa card" /></label>
+      <label>Balance owed <input name="balance" type="number" min="0" step="0.01" required placeholder="2500" /></label>
+      <label>Interest rate (APR %) <input name="apr" type="number" min="0" step="0.01" required placeholder="22.9" /></label>
+      <label>Minimum monthly payment <input name="minPayment" type="number" min="0" step="0.01" required placeholder="75" /></label>
+      <div class="row spread">
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <footer>
+    <p class="muted small">
+      Your data stays on your machine. Plaid never shares your bank password with this app.
+      <button id="unlinkBtn" class="link">Disconnect all banks</button>
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
