@@ -8,6 +8,12 @@ let plaidEnv = 'sandbox';
 let oauthReady = false;
 
 const $ = (sel) => document.querySelector(sel);
+
+// PDF.js worker (used to read text out of uploaded PDF statements, in-browser).
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
 const fmt = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 const fmt2 = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
@@ -46,6 +52,8 @@ async function init() {
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
   $('#addManualBtn').addEventListener('click', () => openDialog());
+  $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
+  $('#statementFile').addEventListener('change', onStatementUpload);
   $('#unlinkBtn').addEventListener('click', unlinkAll);
   $('#strategy').addEventListener('change', render);
   $('#extra').addEventListener('input', render);
@@ -200,9 +208,14 @@ function resetSnapshots() {
 }
 
 let editingId = null;
-function openDialog(debt = null) {
+let dialogOrigin = null;
+function openDialog(debt = null, hint = '') {
   editingId = debt?.id ?? null;
-  $('#dialogTitle').textContent = debt ? 'Edit debt' : 'Add a debt';
+  dialogOrigin = debt?.origin ?? null;
+  $('#dialogTitle').textContent = debt ? (debt.id ? 'Edit debt' : 'Confirm debt') : 'Add a debt';
+  const hintEl = $('#statementHint');
+  hintEl.hidden = !hint;
+  hintEl.innerHTML = hint;
   refreshOwnerOptions();
   const f = $('#debtForm');
   f.owner.value = debt?.owner ?? localStorage.getItem('lastOwner') ?? 'Me';
@@ -230,8 +243,9 @@ function onDialogSubmit(e) {
     balance: parseFloat(f.balance.value),
     apr: parseFloat(f.apr.value),
     minPayment: parseFloat(f.minPayment.value),
-    type: 'manual',
+    type: dialogOrigin === 'statement' ? 'from statement' : 'manual',
     source: 'manual',
+    origin: dialogOrigin || 'manual',
   };
   if (editingId) {
     const d = debts.find((x) => x.id === editingId);
@@ -252,6 +266,115 @@ function deleteDebt(id) {
   debts = debts.filter((x) => x.id !== id);
   saveManualDebts();
   render();
+}
+
+// ===========================================================================
+// Statement upload: read a PDF/CSV statement in-browser, auto-detect the
+// balance/APR/minimum payment, and open the confirm dialog pre-filled.
+// Nothing is uploaded to any server — parsing happens locally.
+// ===========================================================================
+let statementQueue = [];
+
+async function onStatementUpload(e) {
+  const files = [...e.target.files];
+  e.target.value = ''; // allow re-uploading the same file later
+  if (!files.length) return;
+
+  const owner = (prompt(
+    'Whose statement(s) are these? (e.g. Me, Wife, Joint)',
+    localStorage.getItem('lastOwner') || 'Me'
+  ) || 'Me').trim();
+
+  for (const file of files) {
+    try {
+      const text = await extractText(file);
+      const parsed = parseDebtFromText(text, file.name);
+      parsed.owner = owner;
+      statementQueue.push(parsed);
+    } catch (err) {
+      console.error('Statement parse error:', err);
+      alert(`Couldn't read "${file.name}".\n${err.message}\n\nYou can still add it with “Add manually”.`);
+    }
+  }
+  showNextStatement();
+}
+
+// Show the confirm dialog for each parsed statement, one after another.
+function showNextStatement() {
+  if (!statementQueue.length) return;
+  const item = statementQueue.shift();
+  openDialog(item, statementHintFor(item));
+  $('#debtDialog').addEventListener('close', showNextStatement, { once: true });
+}
+
+function statementHintFor(item) {
+  const got = [], miss = [];
+  (item.balance !== '' ? got : miss).push('balance');
+  (item.apr !== '' ? got : miss).push('APR');
+  (item.minPayment !== '' ? got : miss).push('minimum payment');
+  let msg = '📄 <strong>Read from your statement.</strong> ';
+  if (got.length) msg += `Found ${got.join(', ')}. `;
+  if (miss.length) msg += `Couldn't find ${miss.join(', ')} — please fill in by hand. `;
+  return msg + 'Double-check every value before saving.';
+}
+
+// Pull selectable text out of a PDF (or read a CSV) entirely in the browser.
+async function extractText(file) {
+  const lower = file.name.toLowerCase();
+  if (lower.endsWith('.csv') || file.type === 'text/csv') {
+    return await file.text();
+  }
+  if (!window.pdfjsLib) throw new Error('PDF reader failed to load (need an internet connection).');
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it) => it.str).join(' ') + '\n';
+  }
+  if (!text.trim()) throw new Error('No readable text found — the PDF may be a scanned image.');
+  return text;
+}
+
+// Heuristics to find the debt figures on a typical credit-card statement.
+function parseDebtFromText(text, filename) {
+  const t = text.replace(/\s+/g, ' ');
+  const money = (...patterns) => {
+    for (const re of patterns) {
+      const m = t.match(re);
+      if (m) return parseFloat(m[1].replace(/[,$\s]/g, ''));
+    }
+    return '';
+  };
+
+  const balance = money(
+    /new balance[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /statement balance[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /current balance[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /(?:outstanding|account) balance[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /balance[^$\d-]{0,15}\$?\s*([\d,]+\.\d{2})/i
+  );
+  const minPayment = money(
+    /minimum payment due[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /total minimum payment[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /minimum payment[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i,
+    /minimum amount due[^$\d-]{0,25}\$?\s*([\d,]+\.\d{2})/i
+  );
+
+  let apr = '';
+  const aprM =
+    t.match(/(\d{1,2}\.\d{2,3})\s*%\s*(?:apr|annual percentage rate)/i) ||
+    t.match(/(?:purchase )?(?:apr|annual percentage rate)[^%\d]{0,25}(\d{1,2}\.\d{2,3})\s*%/i);
+  if (aprM) apr = parseFloat(aprM[1]);
+
+  // Try to name it after a recognizable issuer; fall back to the filename.
+  const known = ['Navy Federal', 'Capital One', 'Chase', 'Citibank', 'Citi', 'Discover',
+    'American Express', 'Amex', 'Bank of America', 'Wells Fargo', 'USAA', 'Synchrony', 'Barclays'];
+  let name = known.find((k) => new RegExp('\\b' + k.replace(/\s+/g, '\\s+') + '\\b', 'i').test(text)) || '';
+  if (!name) name = filename.replace(/\.(pdf|csv)$/i, '').replace(/[_-]+/g, ' ');
+
+  return { name, balance, apr, minPayment, source: 'manual', origin: 'statement', type: 'from statement' };
 }
 
 // ===========================================================================
@@ -350,7 +473,7 @@ function renderDebts() {
       <div>
         <div class="name">${escapeHtml(d.name)}</div>
         <div class="meta">
-          <span class="pill">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : '✍️ manual'}</span>
+          <span class="pill">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
           ${d.type ? escapeHtml(d.type) : ''}
         </div>
       </div>

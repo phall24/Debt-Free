@@ -6,6 +6,7 @@
   <title>Debt-Free — your payoff plan</title>
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
   <header>
@@ -21,8 +22,10 @@
         <div class="actions">
           <button id="connectBtn" class="primary">🔗 Connect a login</button>
           <button id="refreshBtn" class="ghost" title="Re-pull balances from linked banks">↻ Refresh</button>
+          <button id="uploadBtn" class="ghost">⬆ Upload statement</button>
           <button id="addManualBtn" class="ghost">＋ Add manually</button>
         </div>
+        <input type="file" id="statementFile" accept=".pdf,.csv" multiple hidden />
       </div>
       <div id="setupBanner" hidden></div>
       <p id="plaidStatus" class="muted small"></p>
@@ -105,6 +108,7 @@
   <dialog id="debtDialog">
     <form method="dialog" id="debtForm">
       <h3 id="dialogTitle">Add a debt</h3>
+      <div id="statementHint" class="banner warn" hidden></div>
       <label>Whose debt? <input name="owner" list="ownerOptions" placeholder="e.g. Me, Wife, Joint" /></label>
       <datalist id="ownerOptions"></datalist>
       <label>Name <input name="name" required placeholder="e.g. Visa card" /></label>

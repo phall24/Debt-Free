@@ -47,6 +47,15 @@ Then open **http://localhost:4000**.
 
 ---
 
+## Three ways to add debts
+
+1. **Connect a login (Plaid)** — auto-pulls balances/APRs/min payments. Primary, but
+   needs Plaid production + OAuth access for OAuth banks.
+2. **Upload a statement** — drop in a **PDF or CSV** statement; the app reads the
+   balance, APR, and minimum payment **in your browser** (nothing is uploaded
+   anywhere) and pre-fills a debt for you to confirm. Free, private, no Plaid needed.
+3. **Add manually** — type the four numbers in. Always available.
+
 ## For couples / multiple logins
 
 Built for a household, not just one person:
