@@ -157,6 +157,30 @@ footer { text-align: center; padding: 24px 16px 40px; }
 .setup-steps li { margin: 4px 0; }
 .banner code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
 
+/* ---- Recommendations ---- */
+.recs { display: flex; flex-direction: column; gap: 10px; }
+.rec {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 14px;
+  align-items: center;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.rec.info { grid-template-columns: 1fr; background: #14271a; border-color: #1f4427; }
+.rec-title { font-weight: 600; }
+.rec-impact { text-align: right; }
+.rec-num { color: var(--accent); font-weight: 700; font-size: 1.05rem; white-space: nowrap; }
+.rec button { white-space: nowrap; }
+
+table.scenario { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 8px; }
+table.scenario th, table.scenario td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+table.scenario th { color: var(--muted); font-weight: 600; }
+table.scenario tr.now { background: #14271a; }
+table.scenario tr.now td { color: var(--accent); font-weight: 600; }
+
 /* ---- Analytics ---- */
 .analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
 .chart-box { background: var(--card-2); border-radius: 10px; padding: 16px; }

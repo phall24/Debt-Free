@@ -34,6 +34,20 @@
       <p id="emptyState" class="muted">No debts yet. Connect a bank or add one manually to get started.</p>
     </section>
 
+    <!-- Accounts & net worth -->
+    <section class="card">
+      <div class="row spread">
+        <h2>🏦 Accounts &amp; net worth</h2>
+        <div class="actions">
+          <button id="addAccountBtn" class="ghost">＋ Add account</button>
+        </div>
+      </div>
+      <p class="muted small">Your checking &amp; savings. Net worth = what you have minus what you owe.</p>
+      <div id="accountList" class="debt-list"></div>
+      <p id="accountEmpty" class="muted">No accounts yet. Add your checking and savings to see your net worth.</p>
+      <div id="netWorth"></div>
+    </section>
+
     <!-- Plan controls -->
     <section class="card">
       <h2>Build your plan</h2>
@@ -64,6 +78,16 @@
         <summary>Month-by-month payoff order</summary>
         <div id="schedule" class="schedule"></div>
       </details>
+    </section>
+
+    <!-- Get out of debt sooner -->
+    <section class="card" id="recsCard" hidden>
+      <h2>🚀 Get out of debt sooner</h2>
+      <p class="muted small">Concrete moves and exactly how much sooner each one makes you debt-free — based on your debts and (if imported) your spending.</p>
+      <div id="recsList" class="recs"></div>
+      <h3 style="margin-top:20px">What-if: extra payment scenarios</h3>
+      <p class="muted small">How your debt-free date and total interest change as you add more per month.</p>
+      <div id="scenarioTable"></div>
     </section>
 
     <!-- Analytics -->
@@ -102,7 +126,66 @@
         </div>
       </div>
     </section>
+
+    <!-- Budget & cash flow -->
+    <section class="card">
+      <div class="row spread">
+        <h2>📊 Budget &amp; cash flow</h2>
+        <div class="actions">
+          <button id="importTxBtn" class="primary">📥 Import transactions (CSV)</button>
+          <button id="clearTxBtn" class="ghost" hidden>Clear transactions</button>
+        </div>
+      </div>
+      <input type="file" id="txFile" accept=".csv" multiple hidden />
+      <p id="budgetEmpty" class="muted">
+        Download a transactions CSV from your bank (Navy Federal: Account → Statements/Download → CSV)
+        and import it to see income, spending by category, and monthly trends. Parsed in your browser — nothing is uploaded.
+      </p>
+      <div id="budgetView" hidden>
+        <div class="stats" id="budgetStats"></div>
+        <div class="analytics-grid" style="margin-top:16px">
+          <div class="chart-box">
+            <h3>Spending by category</h3>
+            <p class="muted small">Where your money went over the imported period.</p>
+            <div id="catChart"></div>
+          </div>
+          <div class="chart-box">
+            <h3>Monthly income vs spending</h3>
+            <p class="muted small">Green above the line is money you could put toward debt.</p>
+            <div id="trendChart"></div>
+          </div>
+        </div>
+        <details>
+          <summary>All transactions (<span id="txCount">0</span>)</summary>
+          <div class="row" style="gap:8px;margin:10px 0">
+            <input id="txSearch" placeholder="Search transactions…" style="flex:1" />
+          </div>
+          <div id="txList" class="schedule"></div>
+        </details>
+      </div>
+    </section>
   </main>
+
+  <!-- Account add/edit modal -->
+  <dialog id="accountDialog">
+    <form method="dialog" id="accountForm">
+      <h3 id="accountDialogTitle">Add account</h3>
+      <label>Whose account? <input name="owner" list="ownerOptions" placeholder="e.g. Me, Wife, Joint" /></label>
+      <label>Name <input name="name" required placeholder="e.g. NFCU Checking" /></label>
+      <label>Type
+        <select name="type">
+          <option value="checking">Checking</option>
+          <option value="savings">Savings</option>
+          <option value="cash">Cash</option>
+        </select>
+      </label>
+      <label>Current balance <input name="balance" type="number" step="0.01" min="0" required placeholder="2500" /></label>
+      <div class="row spread">
+        <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+        <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Manual-entry / edit modal -->
   <dialog id="debtDialog">
@@ -115,8 +198,10 @@
       <label>Balance owed <input name="balance" type="number" min="0" step="0.01" required placeholder="2500" /></label>
       <label>Interest rate (APR %) <input name="apr" type="number" min="0" step="0.01" required placeholder="22.9" /></label>
       <label>Minimum monthly payment <input name="minPayment" type="number" min="0" step="0.01" required placeholder="75" /></label>
+      <label>Credit limit (optional) <input name="creditLimit" type="number" min="0" step="0.01" placeholder="15000" /></label>
+      <label>Payment due date (optional) <input name="dueDate" type="date" /></label>
       <div class="row spread">
-        <button value="cancel" class="ghost">Cancel</button>
+        <button value="cancel" class="ghost" formnovalidate>Cancel</button>
         <button value="save" class="primary">Save</button>
       </div>
     </form>

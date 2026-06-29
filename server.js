@@ -58,7 +58,13 @@ function saveTokens(tokens) {
 // ---------------------------------------------------------------------------
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+// Never cache the app shell/assets — this is a fast-moving local tool, and the
+// Cloudflare tunnel + browser would otherwise serve stale code after edits.
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res) => res.set('Cache-Control', 'no-store, max-age=0'),
+}));
 
 // Lets the frontend know whether Plaid is wired up or if it should fall back
 // to manual entry only.
@@ -69,20 +75,30 @@ app.get('/api/config', (req, res) => {
 // Step 1: create a short-lived link_token used to open Plaid Link in the browser.
 app.post('/api/create_link_token', async (req, res) => {
   if (!plaid) return res.status(400).json({ error: 'Plaid not configured. See README.' });
+  const base = {
+    user: { client_user_id: 'debt-free-local-user' },
+    client_name: 'Debt-Free',
+    country_codes: [CountryCode.Us],
+    language: 'en',
+  };
+  // Required for OAuth banks (e.g. Navy Federal). Must match a URI registered
+  // in the Plaid dashboard. Without it, OAuth institutions can't redirect back.
+  if (PLAID_REDIRECT_URI) base.redirect_uri = PLAID_REDIRECT_URI;
+
   try {
-    const request = {
-      user: { client_user_id: 'debt-free-local-user' },
-      client_name: 'Debt-Free',
-      products: [Products.Liabilities],
-      country_codes: [CountryCode.Us],
-      language: 'en',
-    };
-    // Required for OAuth banks (e.g. Navy Federal). Must match a URI registered
-    // in the Plaid dashboard. Without it, OAuth institutions can't redirect back.
-    if (PLAID_REDIRECT_URI) request.redirect_uri = PLAID_REDIRECT_URI;
-    const response = await plaid.linkTokenCreate(request);
-    res.json(response.data);
+    // Prefer pulling transactions too, but gracefully fall back to liabilities-only
+    // if the account isn't enabled for the Transactions product yet.
+    const response = await plaid.linkTokenCreate({ ...base, products: [Products.Liabilities, Products.Transactions] });
+    res.json({ ...response.data, transactions: true });
   } catch (err) {
+    if (err.response?.data?.error_code === 'INVALID_PRODUCT') {
+      try {
+        const response = await plaid.linkTokenCreate({ ...base, products: [Products.Liabilities] });
+        return res.json({ ...response.data, transactions: false });
+      } catch (err2) {
+        return sendPlaidError(res, err2);
+      }
+    }
     sendPlaidError(res, err);
   }
 });
@@ -129,6 +145,7 @@ app.get('/api/liabilities', async (req, res) => {
   if (!plaid) return res.status(400).json({ error: 'Plaid not configured. See README.' });
   const tokens = loadTokens();
   const debts = [];
+  const depositAccounts = [];
   const errors = [];
 
   for (const { access_token, institution, owner = 'Me' } of tokens) {
@@ -137,6 +154,20 @@ app.get('/api/liabilities', async (req, res) => {
       const accounts = resp.data.accounts;
       const liabilities = resp.data.liabilities;
       const nameOf = (id) => accounts.find((a) => a.account_id === id)?.name ?? 'Account';
+
+      // Checking/savings come on the same response — surface them as assets.
+      for (const acct of accounts) {
+        if (acct.type === 'depository') {
+          depositAccounts.push({
+            source: 'plaid',
+            institution,
+            owner,
+            name: acct.name,
+            type: acct.subtype || 'checking',
+            balance: acct.balances?.available ?? acct.balances?.current ?? 0,
+          });
+        }
+      }
 
       for (const card of liabilities.credit ?? []) {
         const acct = accounts.find((a) => a.account_id === card.account_id);
@@ -149,6 +180,8 @@ app.get('/api/liabilities', async (req, res) => {
           balance: acct?.balances?.current ?? 0,
           apr: pickApr(card.aprs),
           minPayment: card.minimum_payment_amount ?? estimateMinPayment(acct?.balances?.current ?? 0),
+          creditLimit: acct?.balances?.limit ?? null,
+          dueDate: card.next_payment_due_date ?? null,
         });
       }
 
@@ -182,8 +215,65 @@ app.get('/api/liabilities', async (req, res) => {
     }
   }
 
-  res.json({ debts, errors });
+  res.json({ debts, accounts: depositAccounts, errors });
 });
+
+// Pull transactions across all linked institutions (requires Transactions product).
+app.get('/api/transactions', async (req, res) => {
+  if (!plaid) return res.status(400).json({ error: 'Plaid not configured. See README.' });
+  const tokens = loadTokens();
+  const txns = [];
+  const errors = [];
+
+  for (const { access_token, owner = 'Me' } of tokens) {
+    try {
+      let cursor;
+      let hasMore = true;
+      let guard = 0;
+      while (hasMore && guard++ < 50) {
+        const resp = await plaid.transactionsSync({ access_token, cursor });
+        for (const t of resp.data.added) {
+          txns.push({
+            date: t.date,
+            description: t.merchant_name || t.name,
+            amount: -t.amount, // Plaid: positive = money OUT; this app: positive = money IN
+            category: mapPlaidCategory(t.personal_finance_category?.primary),
+            owner,
+          });
+        }
+        cursor = resp.data.next_cursor;
+        hasMore = resp.data.has_more;
+      }
+    } catch (err) {
+      const data = err.response?.data;
+      errors.push({ owner, error_code: data?.error_code, message: data?.error_message ?? err.message });
+    }
+  }
+  res.json({ transactions: txns, errors });
+});
+
+// Map Plaid's personal_finance_category to this app's simple categories.
+function mapPlaidCategory(primary) {
+  const map = {
+    INCOME: 'Income',
+    TRANSFER_IN: 'Transfer',
+    TRANSFER_OUT: 'Transfer',
+    LOAN_PAYMENTS: 'Debt payment',
+    BANK_FEES: 'Other',
+    ENTERTAINMENT: 'Subscriptions',
+    FOOD_AND_DRINK: 'Dining',
+    GENERAL_MERCHANDISE: 'Shopping',
+    GENERAL_SERVICES: 'Other',
+    GOVERNMENT_AND_NON_PROFIT: 'Other',
+    MEDICAL: 'Health',
+    PERSONAL_CARE: 'Health',
+    RENT_AND_UTILITIES: 'Utilities',
+    TRANSPORTATION: 'Transport',
+    TRAVEL: 'Transport',
+    HOME_IMPROVEMENT: 'Shopping',
+  };
+  return map[primary] ?? null; // null → client falls back to keyword categorization
+}
 
 // List connected logins (no secrets) so the UI can show/manage them.
 app.get('/api/links', (req, res) => {
