@@ -3,6 +3,8 @@
 // ===========================================================================
 // Each debt: { id, name, type, balance, apr, minPayment, source: 'plaid'|'manual' }
 let debts = loadManualDebts();
+let excludedKeys = loadExcluded();       // Plaid account_ids the user removed
+let debtOverrides = loadDebtOverrides(); // account_id -> edited fields (apr, payment…)
 let accounts = loadAccounts();           // checking/savings (assets)
 let transactions = loadTransactions();   // imported from CSV
 let plaidConfigured = false;
@@ -10,6 +12,17 @@ let plaidEnv = 'sandbox';
 let oauthReady = false;
 
 const $ = (sel) => document.querySelector(sel);
+
+// When served through an ngrok free tunnel, same-origin API calls would hit the
+// "browser warning" interstitial. This header tells ngrok to skip it. Only added
+// to our own relative URLs so cross-origin (Plaid) requests are untouched.
+const _fetch = window.fetch.bind(window);
+window.fetch = (url, opts = {}) => {
+  if (typeof url === 'string' && url.startsWith('/')) {
+    opts = { ...opts, headers: { ...(opts.headers || {}), 'ngrok-skip-browser-warning': 'true' } };
+  }
+  return _fetch(url, opts);
+};
 
 // PDF.js worker (used to read text out of uploaded PDF statements, in-browser).
 if (window.pdfjsLib) {
@@ -54,6 +67,7 @@ async function init() {
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
   $('#addManualBtn').addEventListener('click', () => openDialog());
+  $('#restoreHiddenBtn').addEventListener('click', restoreHidden);
   $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
   $('#statementFile').addEventListener('change', onStatementUpload);
   $('#addAccountBtn').addEventListener('click', () => openAccountDialog());
@@ -62,6 +76,16 @@ async function init() {
   $('#txFile').addEventListener('change', onTransactionsUpload);
   $('#clearTxBtn').addEventListener('click', clearTransactions);
   $('#txSearch').addEventListener('input', renderTxList);
+  $('#filterMonth').addEventListener('change', (e) => { budgetFilter.month = e.target.value; renderBudget(); });
+  $('#filterOwner').addEventListener('change', (e) => { budgetFilter.owner = e.target.value; renderBudget(); });
+  $('#budgetTargetsBtn').addEventListener('click', openTargetsDialog);
+  $('#targetsForm').addEventListener('submit', onTargetsSubmit);
+  $('#detailCloseBtn').addEventListener('click', () => $('#detailDialog').close());
+  $('#detailEditBtn').addEventListener('click', () => {
+    $('#detailDialog').close();
+    const d = debts.find((x) => x.id === detailDebtId);
+    if (d) openDialog(d);
+  });
   $('#unlinkBtn').addEventListener('click', unlinkAll);
   $('#strategy').addEventListener('change', render);
   $('#extra').addEventListener('input', render);
@@ -139,6 +163,23 @@ async function connectBank() {
   handler.open();
 }
 
+// Plaid items the user has chosen to hide (by account_id), persisted locally.
+function loadExcluded() {
+  try { return new Set(JSON.parse(localStorage.getItem('excludedKeys') || '[]')); } catch { return new Set(); }
+}
+function saveExcluded() {
+  localStorage.setItem('excludedKeys', JSON.stringify([...excludedKeys]));
+}
+
+// User edits to Plaid debts (e.g. APR/payment for auto loans Plaid can't provide),
+// keyed by account_id so they survive each refresh.
+function loadDebtOverrides() {
+  try { return JSON.parse(localStorage.getItem('debtOverrides') || '{}'); } catch { return {}; }
+}
+function saveDebtOverrides() {
+  localStorage.setItem('debtOverrides', JSON.stringify(debtOverrides));
+}
+
 // Exchange the public token for stored access, then refresh the debt list.
 async function finishLink(public_token, owner) {
   localStorage.removeItem('plaidLinkToken');
@@ -157,17 +198,86 @@ async function pullPlaidDebts() {
   try {
     const { debts: pulled, accounts: pulledAccts = [], errors } = await fetch('/api/liabilities').then((r) => r.json());
     // Replace all plaid-sourced debts/accounts, keep manually-added ones.
+    // Skip any the user has explicitly removed (by Plaid account_id).
     debts = debts.filter((d) => d.source === 'manual');
-    for (const d of pulled) debts.push({ ...d, id: cryptoId() });
+    for (const d of pulled) {
+      if (d.account_id && excludedKeys.has(d.account_id)) continue;
+      const ov = (d.account_id && debtOverrides[d.account_id]) || {};
+      debts.push({ ...d, ...ov, id: cryptoId() });
+    }
     accounts = accounts.filter((a) => a.source !== 'plaid');
-    for (const a of pulledAccts) accounts.push({ ...a, id: cryptoId() });
+    for (const a of pulledAccts) {
+      if (a.account_id && excludedKeys.has(a.account_id)) continue;
+      accounts.push({ ...a, id: cryptoId() });
+    }
     if (errors?.length) {
       console.warn('Plaid pull errors:', errors);
     }
     await pullPlaidTransactions();
+    inferLoanPayments();
   } catch (err) {
     console.error(err);
   }
+}
+
+// For auto/personal loans (where Plaid gives no terms), infer the monthly payment
+// from the recurring loan-payment transactions — by account, or by the loan's mask
+// appearing in the payment description. APR still has to be entered by hand.
+function inferLoanPayments() {
+  // 1. Try matching a payment to each loan by its account/mask (most reliable).
+  // 2. For vehicle loans whose payments are generic "Transfer to Loan" with no
+  //    car id, pair the recurring payment amounts to the loans by balance rank
+  //    (largest payment → largest balance). The user can flip it via Edit.
+  const carPayments = recurringLoanPayments(); // distinct recurring amounts, desc
+  const cars = [];
+  for (const d of debts) {
+    if (!d.needsTerms || !d.account_id) continue;
+    if (debtOverrides[d.account_id]?.minPayment) continue; // user already set it
+
+    const direct = inferLoanPaymentDirect(d);
+    if (direct) { d.minPayment = direct; d.paymentInferred = true; continue; }
+
+    // Vehicle loan with no direct match → queue for balance-rank assignment.
+    if (/loan/i.test(d.type) && !/line of credit/i.test(d.type)) cars.push(d);
+  }
+  cars.sort((a, b) => b.balance - a.balance);
+  cars.forEach((car, i) => {
+    if (carPayments[i]) { car.minPayment = carPayments[i]; car.paymentInferred = true; }
+  });
+}
+
+// A payment matched directly to a loan via its account_id or mask.
+function inferLoanPaymentDirect(d) {
+  const byAcct = transactions.filter((t) => t.account_id === d.account_id);
+  const byMask = d.mask ? transactions.filter((t) => t.description.includes(d.mask) && t.amount < 0) : [];
+  return recurringAmount(byAcct.length ? byAcct : byMask, 20);
+}
+
+// Distinct recurring "Transfer to Loan" payment amounts (the car payments), desc.
+function recurringLoanPayments() {
+  const pool = transactions.filter((t) => t.amount < 0 && /transfer to loan/i.test(t.description));
+  const byAmt = {};
+  for (const t of pool) {
+    const a = Math.round(Math.abs(t.amount));
+    if (a < 50) continue;
+    (byAmt[a] = byAmt[a] || new Set()).add(t.date.slice(0, 7));
+  }
+  return Object.entries(byAmt).filter(([, m]) => m.size >= 2).map(([a]) => +a).sort((x, y) => y - x);
+}
+
+// The amount that recurs across the most months in a set of transactions.
+function recurringAmount(txs, floor) {
+  const groups = {};
+  for (const t of txs) {
+    const amt = Math.round(Math.abs(t.amount));
+    if (amt < floor) continue;
+    (groups[amt] = groups[amt] || new Set()).add(t.date.slice(0, 7));
+  }
+  let best = 0, bestMonths = 1;
+  for (const [amt, months] of Object.entries(groups)) {
+    if (months.size >= 2 && months.size > bestMonths) { best = +amt; bestMonths = months.size; }
+  }
+  return best;
 }
 
 // Pull transactions from Plaid into the budget view.
@@ -200,6 +310,16 @@ async function unlinkAll() {
   await fetch('/api/unlink_all', { method: 'POST' });
   debts = debts.filter((d) => d.source === 'manual');
   accounts = accounts.filter((a) => a.source !== 'plaid');
+  excludedKeys.clear();
+  saveExcluded();
+  render();
+}
+
+// Un-hide everything the user previously removed, then re-pull from Plaid.
+async function restoreHidden() {
+  excludedKeys.clear();
+  saveExcluded();
+  if (plaidConfigured) await pullPlaidDebts();
   render();
 }
 
@@ -290,22 +410,31 @@ function onDialogSubmit(e) {
   };
   if (editingId) {
     const d = debts.find((x) => x.id === editingId);
-    Object.assign(d, data);
+    if (d.source === 'plaid' && d.account_id) {
+      // Persist edits as an override so they survive the next Plaid pull.
+      const ov = { name: data.name, apr: data.apr, minPayment: data.minPayment, creditLimit: data.creditLimit, dueDate: data.dueDate, needsTerms: false };
+      debtOverrides[d.account_id] = ov;
+      saveDebtOverrides();
+      Object.assign(d, ov);
+    } else {
+      Object.assign(d, data);
+      saveManualDebts();
+    }
   } else {
     debts.push({ ...data, id: cryptoId() });
+    saveManualDebts();
   }
-  saveManualDebts();
   render();
 }
 
 function deleteDebt(id) {
   const d = debts.find((x) => x.id === id);
   if (d.source === 'plaid') {
-    alert('This debt came from a linked bank. Use “Disconnect all banks” to remove linked debts.');
-    return;
+    if (!confirm(`Hide "${d.name}" from your plan? It will stay hidden even after refreshing. (Reconnecting the bank won't bring it back unless you un-hide it.)`)) return;
+    if (d.account_id) { excludedKeys.add(d.account_id); saveExcluded(); }
   }
   debts = debts.filter((x) => x.id !== id);
-  saveManualDebts();
+  if (d.source === 'manual') saveManualDebts();
   render();
 }
 
@@ -607,11 +736,11 @@ function onAccountSubmit(e) {
 function deleteAccount(id) {
   const a = accounts.find((x) => x.id === id);
   if (a?.source === 'plaid') {
-    alert('This account came from a linked bank. Use “Disconnect all banks” to remove it.');
-    return;
+    if (!confirm(`Hide "${a.name}" from your accounts? It will stay hidden even after refreshing.`)) return;
+    if (a.account_id) { excludedKeys.add(a.account_id); saveExcluded(); }
   }
   accounts = accounts.filter((x) => x.id !== id);
-  saveAccounts();
+  if (a?.source !== 'plaid') saveAccounts();
   render();
 }
 
@@ -685,6 +814,36 @@ const CATEGORY_RULES = [
 function categorize(desc) {
   for (const [re, cat] of CATEGORY_RULES) if (re.test(desc)) return cat;
   return 'Other';
+}
+
+// Canonical category list for dropdowns and budget targets.
+const CATEGORIES = ['Income', 'Transfer', 'Debt payment', 'Housing', 'Utilities', 'Groceries',
+  'Dining', 'Gas', 'Transport', 'Shopping', 'Subscriptions', 'Insurance', 'Health', 'Cash', 'Other'];
+
+function loadJSON(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+}
+let categoryOverrides = loadJSON('categoryOverrides', {}); // txKey -> category
+let budgetTargets = loadJSON('budgetTargets', {});         // category -> monthly $ target
+let budgetFilter = { month: 'all', owner: 'all' };
+
+// Stable signature for a transaction (Plaid txns get fresh ids each pull).
+const txKey = (t) => `${t.date}|${t.amount}|${t.description}`;
+// Effective category — a user override beats the auto-detected one.
+const catOf = (t) => categoryOverrides[txKey(t)] || t.category || 'Other';
+// Categories that are real income/spending (not money just moving around).
+const isFlowCat = (c) => c !== 'Transfer' && c !== 'Debt payment';
+
+function filteredTx() {
+  return transactions.filter((t) =>
+    (budgetFilter.month === 'all' || t.date.slice(0, 7) === budgetFilter.month) &&
+    (budgetFilter.owner === 'all' || (t.owner || 'Me') === budgetFilter.owner));
+}
+function monthSpanOf(txs) {
+  if (!txs.length) return 1;
+  const dates = txs.map((t) => t.date).sort();
+  const a = new Date(dates[0]), b = new Date(dates[dates.length - 1]);
+  return Math.max(1, (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()) + 1);
 }
 
 async function onTransactionsUpload(e) {
@@ -788,6 +947,26 @@ function normalizeDate(s) {
 }
 
 // --- Budget rendering -------------------------------------------------------
+function monthSpan() { return monthSpanOf(transactions); }
+function saveOverrides() { localStorage.setItem('categoryOverrides', JSON.stringify(categoryOverrides)); }
+
+// Normalize a payee/description into a merchant name (drop store numbers, ids).
+function normalizeMerchant(desc) {
+  return desc.replace(/[#*]/g, ' ').replace(/\b\d[\d-]{2,}\b/g, '').replace(/\s+/g, ' ').trim().toUpperCase().slice(0, 28) || desc.toUpperCase();
+}
+
+function populateBudgetFilters() {
+  const months = [...new Set(transactions.map((t) => t.date.slice(0, 7)))].sort().reverse();
+  const owners = [...new Set(transactions.map((t) => t.owner || 'Me'))];
+  const mSel = $('#filterMonth'), oSel = $('#filterOwner');
+  if (budgetFilter.month !== 'all' && !months.includes(budgetFilter.month)) budgetFilter.month = 'all';
+  if (budgetFilter.owner !== 'all' && !owners.includes(budgetFilter.owner)) budgetFilter.owner = 'all';
+  mSel.innerHTML = `<option value="all">All months</option>` + months.map((m) => `<option value="${m}">${m}</option>`).join('');
+  oSel.innerHTML = `<option value="all">Everyone</option>` + owners.map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('');
+  mSel.value = budgetFilter.month;
+  oSel.value = budgetFilter.owner;
+}
+
 function renderBudget() {
   const has = transactions.length > 0;
   $('#budgetEmpty').hidden = has;
@@ -795,97 +974,229 @@ function renderBudget() {
   $('#clearTxBtn').hidden = !has;
   if (!has) return;
 
-  // Exclude transfers & debt payments from income/spending (they move money, not consume it).
-  const isFlow = (t) => t.category !== 'Transfer' && t.category !== 'Debt payment';
-  const income = transactions.filter((t) => isFlow(t) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
-  const spendTx = transactions.filter((t) => isFlow(t) && t.amount < 0 && t.category !== 'Debt payment');
+  populateBudgetFilters();
+  const tx = filteredTx();
+  const months = monthSpanOf(tx);
+
+  const income = tx.filter((t) => isFlowCat(catOf(t)) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const spendTx = tx.filter((t) => t.amount < 0 && isFlowCat(catOf(t)));
   const spending = spendTx.reduce((s, t) => s + Math.abs(t.amount), 0);
-  const debtPaid = transactions.filter((t) => t.category === 'Debt payment' && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const debtPaid = tx.filter((t) => catOf(t) === 'Debt payment' && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   const net = income - spending - debtPaid;
-  const months = monthSpan();
+  const per = (v) => v / months;
+  const multi = months > 1;
 
   $('#budgetStats').innerHTML = `
-    <div class="stat"><div class="key">Income${months > 1 ? ' (total)' : ''}</div><div class="value good">${fmt(income)}</div></div>
-    <div class="stat"><div class="key">Spending</div><div class="value">${fmt(spending)}</div></div>
-    <div class="stat"><div class="key">Debt payments</div><div class="value">${fmt(debtPaid)}</div></div>
-    <div class="stat"><div class="key">Left over</div><div class="value ${net >= 0 ? 'good' : ''}" style="${net < 0 ? 'color:var(--danger)' : ''}">${fmt(net)}</div></div>
-    ${months > 1 ? `<div class="stat"><div class="key">Avg surplus/mo</div><div class="value ${net >= 0 ? 'good' : ''}">${fmt(net / months)}</div></div>` : ''}
+    <div class="stat"><div class="key">Income${multi ? ' /mo' : ''}</div><div class="value good">${fmt(per(income))}</div></div>
+    <div class="stat"><div class="key">Spending${multi ? ' /mo' : ''}</div><div class="value">${fmt(per(spending))}</div></div>
+    <div class="stat"><div class="key">Debt pmts${multi ? ' /mo' : ''}</div><div class="value">${fmt(per(debtPaid))}</div></div>
+    <div class="stat"><div class="key">Left over${multi ? ' /mo' : ''}</div><div class="value ${net >= 0 ? 'good' : ''}" style="${net < 0 ? 'color:var(--danger)' : ''}">${fmt(per(net))}</div></div>
   `;
+  const perMonthSurplus = Math.floor(per(net) / 5) * 5;
+  if (perMonthSurplus > 0) {
+    $('#budgetStats').insertAdjacentHTML('beforeend',
+      `<div class="stat" style="cursor:pointer" id="useSurplus" title="Set this as your debt extra payment">
+        <div class="key">💡 Put toward debt</div><div class="value good">${fmt(perMonthSurplus)}/mo →</div></div>`);
+    $('#useSurplus')?.addEventListener('click', () => {
+      $('#extra').value = perMonthSurplus;
+      renderPlan(); renderAnalytics(); renderRecommendations();
+      $('#resultsCard').scrollIntoView({ behavior: 'smooth' });
+    });
+  }
 
-  renderCategoryChart(spendTx, spending);
+  const byCat = categoryTotals(spendTx);
+  renderInsights(byCat, spending, months, net);
+  renderCategoryChart(byCat, spending, months);
+  renderMerchants(spendTx);
+  renderRecurring();
   renderTrendChart();
   renderTxList();
-  $('#txCount').textContent = transactions.length;
-
-  // Offer to use the leftover as the debt "extra payment"
-  if (net > 0 && months >= 1) {
-    const perMonth = Math.floor(net / months / 5) * 5;
-    if (perMonth > 0) {
-      $('#budgetStats').insertAdjacentHTML('beforeend',
-        `<div class="stat" style="cursor:pointer" id="useSurplus" title="Click to set your debt extra payment">
-          <div class="key">💡 Put toward debt</div><div class="value good">${fmt(perMonth)}/mo →</div></div>`);
-      $('#useSurplus')?.addEventListener('click', () => {
-        $('#extra').value = perMonth;
-        renderPlan(); renderAnalytics();
-        $('#resultsCard').scrollIntoView({ behavior: 'smooth' });
-      });
-    }
-  }
+  $('#txCount').textContent = tx.length;
 }
 
-function monthSpan() {
-  if (!transactions.length) return 1;
-  const dates = transactions.map((t) => t.date).sort();
-  const a = new Date(dates[0]), b = new Date(dates[dates.length - 1]);
-  return Math.max(1, (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()) + 1);
-}
-
-function renderCategoryChart(spendTx, spending) {
+function categoryTotals(spendTx) {
   const byCat = {};
-  for (const t of spendTx) byCat[t.category] = (byCat[t.category] || 0) + Math.abs(t.amount);
+  for (const t of spendTx) byCat[catOf(t)] = (byCat[catOf(t)] || 0) + Math.abs(t.amount);
+  return byCat;
+}
+
+function renderInsights(byCat, spending, months, net) {
+  const el = $('#insightCallouts');
+  const rows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const bits = [];
+  if (rows.length) {
+    const [cat, amt] = rows[0];
+    bits.push(`💰 Your biggest expense is <strong>${escapeHtml(cat)}</strong> at <strong>${fmt(amt / months)}/mo</strong> (${((amt / spending) * 100).toFixed(0)}% of spending).`);
+  }
+  const rec = recurringCharges();
+  if (rec.total > 0) {
+    bits.push(`🔁 You have about <strong>${fmt(rec.total)}/mo</strong> in recurring charges. Cutting half would free <strong>${fmt(rec.total / 2)}/mo</strong> for debt.`);
+  }
+  // Over-budget warnings
+  const over = Object.entries(budgetTargets).filter(([c, tgt]) => tgt > 0 && (byCat[c] || 0) / months > tgt)
+    .map(([c, tgt]) => `${c} (+${fmt((byCat[c] / months) - tgt)})`);
+  if (over.length) bits.push(`⚠️ Over budget on <strong>${over.join(', ')}</strong> this period.`);
+
+  el.innerHTML = bits.map((b) => `<div class="insight">${b}</div>`).join('');
+}
+
+function renderCategoryChart(byCat, spending, months) {
   const rows = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   const max = rows[0]?.[1] || 1;
-  $('#catChart').innerHTML = rows.map(([cat, amt], i) => `
-    <div class="bar-row">
+  $('#catChart').innerHTML = rows.map(([cat, amt], i) => {
+    const tgt = budgetTargets[cat];
+    const perMo = amt / months;
+    let tgtTxt = '';
+    if (tgt > 0) {
+      const cls = perMo > tgt ? 'over-budget' : 'under-budget';
+      tgtTxt = ` <span class="${cls}">/ ${fmt(tgt)} ${perMo > tgt ? 'over' : 'ok'}</span>`;
+    }
+    const tgtMark = tgt > 0 ? `<div style="position:absolute;top:0;bottom:0;left:${Math.min(100, (tgt * months / max) * 100)}%;width:2px;background:var(--warn)"></div>` : '';
+    return `
+    <div class="bar-row clickable" data-cat="${escapeHtml(cat)}" title="Click to see ${escapeHtml(cat)} transactions">
       <span class="bar-label">${escapeHtml(cat)}</span>
-      <div class="bar-track"><div class="bar-fill" style="width:${(amt / max) * 100}%;background:${COLORS[i % COLORS.length]}"></div></div>
-      <span class="bar-val">${fmt(amt)} · ${((amt / spending) * 100).toFixed(0)}%</span>
-    </div>`).join('') || '<p class="muted small">No spending found.</p>';
+      <div class="bar-track" style="position:relative"><div class="bar-fill" style="width:${(amt / max) * 100}%;background:${COLORS[i % COLORS.length]}"></div>${tgtMark}</div>
+      <span class="bar-val">${fmt(perMo)}${months > 1 ? '/mo' : ''}${tgtTxt}</span>
+    </div>`;
+  }).join('') || '<p class="muted small">No spending in this view.</p>';
+  $('#catChart').querySelectorAll('[data-cat]').forEach((el) =>
+    el.addEventListener('click', () => {
+      const cat = el.dataset.cat;
+      openTxList(`${cat} — spending`, filteredTx().filter((t) => t.amount < 0 && catOf(t) === cat).sort((a, b) => (a.date < b.date ? 1 : -1)));
+    }));
+}
+
+function renderMerchants(spendTx) {
+  const byM = {};
+  for (const t of spendTx) {
+    const m = normalizeMerchant(t.description);
+    byM[m] = byM[m] || { total: 0, count: 0 };
+    byM[m].total += Math.abs(t.amount);
+    byM[m].count++;
+  }
+  const rows = Object.entries(byM).sort((a, b) => b[1].total - a[1].total).slice(0, 8);
+  const max = rows[0]?.[1].total || 1;
+  $('#merchantChart').innerHTML = rows.map(([m, d], i) => `
+    <div class="bar-row clickable" data-merchant="${escapeHtml(m)}" title="Click to see ${escapeHtml(m)} transactions">
+      <span class="bar-label" title="${escapeHtml(m)}">${escapeHtml(m)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${(d.total / max) * 100}%;background:${COLORS[i % COLORS.length]}"></div></div>
+      <span class="bar-val">${fmt(d.total)} · ${d.count}×</span>
+    </div>`).join('') || '<p class="muted small">No spending in this view.</p>';
+  $('#merchantChart').querySelectorAll('[data-merchant]').forEach((el) =>
+    el.addEventListener('click', () => {
+      const m = el.dataset.merchant;
+      openTxList(m, filteredTx().filter((t) => t.amount < 0 && normalizeMerchant(t.description) === m).sort((a, b) => (a.date < b.date ? 1 : -1)));
+    }));
+}
+
+// Detect recurring charges: same merchant + similar amount across 2+ months.
+function recurringCharges() {
+  const groups = {};
+  for (const t of filteredTx()) {
+    if (t.amount >= 0 || !isFlowCat(catOf(t))) continue;
+    const key = normalizeMerchant(t.description) + '|' + Math.round(Math.abs(t.amount));
+    (groups[key] = groups[key] || []).push(t);
+  }
+  const recurring = [];
+  for (const [key, items] of Object.entries(groups)) {
+    const monthsHit = new Set(items.map((t) => t.date.slice(0, 7)));
+    if (monthsHit.size >= 2) {
+      const amt = Math.abs(items[0].amount);
+      recurring.push({ merchant: key.split('|')[0], amount: amt, months: monthsHit.size, count: items.length });
+    }
+  }
+  recurring.sort((a, b) => b.amount - a.amount);
+  return { list: recurring.slice(0, 10), total: recurring.reduce((s, r) => s + r.amount, 0) };
+}
+
+function renderRecurring() {
+  const { list, total } = recurringCharges();
+  if (!list.length) {
+    $('#recurringList').innerHTML = '<p class="muted small">No recurring charges detected (need 2+ months of data).</p>';
+    return;
+  }
+  $('#recurringList').innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>~${fmt(total)}/mo total</span><span></span><span></span></div>` +
+    list.map((r) => `
+      <div class="recurring-row clickable" data-merchant="${escapeHtml(r.merchant)}" title="Click to see these charges">
+        <span>${escapeHtml(r.merchant)}</span>
+        <span class="freq">${r.months} mo · ${r.count}×</span>
+        <span class="bar-val">${fmt2(r.amount)}/mo</span>
+      </div>`).join('');
+  $('#recurringList').querySelectorAll('[data-merchant]').forEach((el) =>
+    el.addEventListener('click', () => {
+      const m = el.dataset.merchant;
+      openTxList(`${m} — recurring`, filteredTx().filter((t) => t.amount < 0 && normalizeMerchant(t.description) === m).sort((a, b) => (a.date < b.date ? 1 : -1)));
+    }));
 }
 
 function renderTrendChart() {
   const byMonth = {};
   for (const t of transactions) {
+    if (budgetFilter.owner !== 'all' && (t.owner || 'Me') !== budgetFilter.owner) continue;
     const m = t.date.slice(0, 7);
     byMonth[m] ??= { income: 0, spend: 0 };
-    if (t.category === 'Transfer') continue;
+    const c = catOf(t);
+    if (!isFlowCat(c)) continue;
     if (t.amount > 0) byMonth[m].income += t.amount;
-    else if (t.category !== 'Debt payment') byMonth[m].spend += Math.abs(t.amount);
+    else byMonth[m].spend += Math.abs(t.amount);
   }
   const months = Object.keys(byMonth).sort();
   if (months.length < 2) {
-    $('#trendChart').innerHTML = '<p class="muted small">Import more than one month to see trends.</p>';
+    $('#trendChart').innerHTML = '<p class="muted small">Need 2+ months of data to show trends.</p>';
     return;
   }
   const max = Math.max(...months.map((m) => Math.max(byMonth[m].income, byMonth[m].spend)), 1);
   $('#trendChart').innerHTML = months.map((m) => {
     const d = byMonth[m];
-    return `<div class="bar-row" style="grid-template-columns:64px 1fr 1fr">
+    return `<div class="bar-row clickable" data-month="${m}" title="Click to view ${m}" style="grid-template-columns:64px 1fr 1fr">
       <span class="bar-label">${m}</span>
       <div class="bar-track" title="Income ${fmt(d.income)}"><div class="bar-fill" style="width:${(d.income / max) * 100}%;background:var(--accent)"></div></div>
       <div class="bar-track" title="Spending ${fmt(d.spend)}"><div class="bar-fill" style="width:${(d.spend / max) * 100}%;background:var(--danger)"></div></div>
     </div>`;
-  }).join('') + `<div class="legend"><span><i style="background:var(--accent)"></i>Income</span><span><i style="background:var(--danger)"></i>Spending</span></div>`;
+  }).join('') + `<div class="legend"><span><i style="background:var(--accent)"></i>Income</span><span><i style="background:var(--danger)"></i>Spending</span> · <span class="muted">click a month to drill in</span></div>`;
+  $('#trendChart').querySelectorAll('[data-month]').forEach((el) =>
+    el.addEventListener('click', () => { budgetFilter.month = el.dataset.month; renderBudget(); }));
 }
 
+let shownTx = [];
 function renderTxList() {
   const q = ($('#txSearch')?.value || '').toLowerCase();
-  const shown = transactions.filter((t) => !q || t.description.toLowerCase().includes(q) || t.category.toLowerCase().includes(q)).slice(0, 300);
-  $('#txList').innerHTML = shown.map((t) => `
+  shownTx = filteredTx().filter((t) => !q || t.description.toLowerCase().includes(q) || catOf(t).toLowerCase().includes(q)).slice(0, 400);
+  $('#txList').innerHTML = shownTx.map((t, i) => `
     <div class="item">
-      <span>${t.date} · ${escapeHtml(t.description)} <span class="pill">${escapeHtml(t.category)}</span></span>
+      <span>${t.date} · ${escapeHtml(t.description)}
+        <select class="cat-pill-select" data-i="${i}">${CATEGORIES.map((c) => `<option ${c === catOf(t) ? 'selected' : ''}>${c}</option>`).join('')}</select>
+      </span>
       <span class="when" style="color:${t.amount < 0 ? 'var(--danger)' : 'var(--accent)'}">${t.amount < 0 ? '-' : '+'}${fmt2(Math.abs(t.amount))}</span>
     </div>`).join('') || '<p class="muted small">No matches.</p>';
+  $('#txList').querySelectorAll('select[data-i]').forEach((sel) =>
+    sel.addEventListener('change', () => {
+      const t = shownTx[+sel.dataset.i];
+      categoryOverrides[txKey(t)] = sel.value;
+      saveOverrides();
+      render();
+    }));
+}
+
+// Budget targets dialog
+function openTargetsDialog() {
+  const cats = CATEGORIES.filter((c) => isFlowCat(c) && c !== 'Income');
+  $('#targetsFields').innerHTML = cats.map((c) =>
+    `<label>${c}<input type="number" min="0" step="10" name="${c}" value="${budgetTargets[c] ?? ''}" placeholder="—" /></label>`).join('');
+  $('#targetsDialog').showModal();
+}
+function onTargetsSubmit(e) {
+  if (e.submitter?.value === 'cancel') return;
+  const f = e.target;
+  const next = {};
+  for (const c of CATEGORIES) {
+    const field = f.elements[c];
+    if (field && field.value) next[c] = parseFloat(field.value);
+  }
+  budgetTargets = next;
+  localStorage.setItem('budgetTargets', JSON.stringify(budgetTargets));
+  render();
 }
 
 // ===========================================================================
@@ -895,7 +1206,7 @@ function renderTxList() {
 // minimum, then throw all remaining money at ONE target debt chosen by the
 // strategy. When a debt is cleared, its freed-up payment rolls onto the next
 // (the snowball effect) — total monthly outlay stays constant.
-function simulate(inputDebts, strategy, extra) {
+function simulate(inputDebts, strategy, extra, priorityId) {
   const list = inputDebts.map((d) => ({ ...d, balance: d.balance }));
   const totalMin = list.reduce((s, d) => s + d.minPayment, 0);
   const monthlyBudget = totalMin + Math.max(0, extra);
@@ -908,10 +1219,14 @@ function simulate(inputDebts, strategy, extra) {
   const trajectory = [{ month: 0, balance: startBalance, interest: 0 }];
   const MAX_MONTHS = 1200; // 100-year safety cap
 
-  const order = (active) =>
-    [...active].sort((a, b) =>
+  const order = (active) => {
+    const sorted = [...active].sort((a, b) =>
       strategy === 'avalanche' ? b.apr - a.apr : a.balance - b.balance
     );
+    // Optionally force one debt to the front of the attack order.
+    if (priorityId) return sorted.filter((d) => d.id === priorityId).concat(sorted.filter((d) => d.id !== priorityId));
+    return sorted;
+  };
 
   while (list.some((d) => d.balance > 0.005) && months < MAX_MONTHS) {
     months++;
@@ -980,6 +1295,12 @@ function renderDebts() {
   const list = $('#debtList');
   list.innerHTML = '';
   $('#emptyState').hidden = debts.length > 0;
+
+  // Restore-hidden button reflects how many Plaid items are currently hidden.
+  const restoreBtn = $('#restoreHiddenBtn');
+  restoreBtn.hidden = excludedKeys.size === 0;
+  restoreBtn.textContent = `↩ Restore ${excludedKeys.size} hidden`;
+
   if (!debts.length) return;
 
   // Group debts by owner.
@@ -991,12 +1312,12 @@ function renderDebts() {
   }
 
   const debtRow = (d) => `
-    <div class="debt">
+    <div class="debt clickable" data-detail="${d.id}" title="Click for details">
       <div>
         <div class="name">${escapeHtml(d.name)}</div>
         <div class="meta">
           <span class="pill">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
-          ${d.type ? escapeHtml(d.type) : ''}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}
+          ${d.type ? escapeHtml(d.type) : ''}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ click Edit to set APR${d.minPayment ? '' : ' &amp; payment'}</span>` : ''}
         </div>
       </div>
       <div class="num"><span class="label">Balance</span>${fmt2(d.balance)}</div>
@@ -1030,12 +1351,201 @@ function renderDebts() {
   }
 
   list.innerHTML = html;
+  list.querySelectorAll('[data-detail]').forEach((el) =>
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.row-actions')) return; // let Edit/✕ do their thing
+      openDebtDetail(el.dataset.detail);
+    })
+  );
   list.querySelectorAll('[data-edit]').forEach((b) =>
     b.addEventListener('click', () => openDialog(debts.find((d) => d.id === b.dataset.edit)))
   );
   list.querySelectorAll('[data-del]').forEach((b) =>
     b.addEventListener('click', () => deleteDebt(b.dataset.del))
   );
+}
+
+// --- Debt drill-down --------------------------------------------------------
+let detailDebtId = null;
+function openDebtDetail(id) {
+  const d = debts.find((x) => x.id === id);
+  if (!d) return;
+  detailDebtId = id;
+  $('#detailEditBtn').style.display = '';
+  const strategy = $('#strategy').value;
+  const extra = parseFloat($('#extra').value) || 0;
+  const monthlyInterest = d.balance * (d.apr / 100 / 12);
+  const totalDebt = debts.reduce((s, x) => s + x.balance, 0);
+  const share = totalDebt ? (d.balance / totalDebt) * 100 : 0;
+  const cleared = simulate(debts, strategy, extra).payoffOrder.find((p) => p.id === id);
+
+  const cells = [
+    ['Balance', fmt2(d.balance)],
+    ['APR', d.apr.toFixed(2) + '%'],
+    ['Min payment', fmt2(d.minPayment)],
+    ['Interest / mo', fmt2(monthlyInterest)],
+  ];
+  if (d.creditLimit) {
+    cells.push(['Credit limit', fmt(d.creditLimit)]);
+    cells.push(['Utilization', Math.round((d.balance / d.creditLimit) * 100) + '%']);
+  }
+  if (d.dueDate) cells.push(['Due date', d.dueDate]);
+  cells.push(['Interest / yr', fmt(monthlyInterest * 12)]);
+  cells.push(['% of your debt', share.toFixed(0) + '%']);
+
+  // Target-this-first impact across all debts.
+  const base = simulate(debts, strategy, extra);
+  const targeted = simulate(debts, strategy, extra, id);
+  const tgtSaved = base.totalInterest - targeted.totalInterest;
+  let targetHtml = '';
+  if (debts.length > 1 && !base.stalled && !targeted.stalled) {
+    if (tgtSaved >= 1) {
+      targetHtml = `<div class="insight">🎯 <strong>Attack this debt first</strong> and you'd save <strong>${fmt(tgtSaved)}</strong> in total interest across all your debts (vs your current ${cap(strategy)} order).</div>`;
+    } else if (tgtSaved <= -1) {
+      targetHtml = `<div class="insight" style="background:var(--card-2);border-color:var(--border)">Targeting this first would cost <strong>${fmt(-tgtSaved)}</strong> more interest than your current order — it's not your most efficient next target.</div>`;
+    } else {
+      targetHtml = `<div class="insight" style="background:var(--card-2);border-color:var(--border)">Targeting this first is about the same as your current order.</div>`;
+    }
+  }
+
+  // Payment history from transactions.
+  const pays = paymentHistory(d);
+  let payHtml = '';
+  if (pays.list.length) {
+    payHtml = `<div class="detail-section"><h4>Payment history</h4>
+      <div class="detail-grid">
+        <div class="cell"><div class="k">Paid this year</div><div class="v">${fmt(pays.thisYear)}</div></div>
+        <div class="cell"><div class="k">Avg payment</div><div class="v">${fmt2(pays.avg)}</div></div>
+        <div class="cell"><div class="k">Payments</div><div class="v">${pays.list.length}</div></div>
+      </div>
+      <div class="detail-tx schedule" style="margin-top:8px">
+        ${pays.list.slice(0, 10).map((t) => `<div class="item"><span>${t.date} · ${escapeHtml(t.description)}</span><span class="when" style="color:var(--accent)">${fmt2(Math.abs(t.amount))}</span></div>`).join('')}
+      </div></div>`;
+  }
+
+  const maxExtra = Math.max(500, Math.ceil((d.balance / 12) / 50) * 50);
+  $('#detailContent').innerHTML = `
+    <div class="detail-head">
+      <h3>${escapeHtml(d.name)}</h3>
+      <div class="sub">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'} · ${escapeHtml(d.type || 'debt')} · ${escapeHtml(d.owner || 'Me')}</div>
+    </div>
+    <div class="detail-grid">
+      ${cells.map(([k, v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('')}
+    </div>
+    ${cleared ? `<div class="insight">🗓️ Your current plan clears this <strong>${dateAfter(cleared.month)}</strong> (${humanMonths(cleared.month)} from now).</div>` : ''}
+    ${targetHtml}
+    <div class="detail-section">
+      <h4>Pay extra on just this debt</h4>
+      <div class="row" style="gap:10px;align-items:center">
+        <input type="range" id="detailExtra" min="0" max="${maxExtra}" step="25" value="0" style="flex:1" />
+        <span id="detailExtraLabel" style="min-width:90px;text-align:right;font-variant-numeric:tabular-nums">+$0/mo</span>
+      </div>
+      <div id="detailPayoff"></div>
+    </div>
+    ${payHtml}
+  `;
+  // Wire the slider and render the initial payoff chart/schedule.
+  const slider = $('#detailExtra');
+  slider.addEventListener('input', () => {
+    $('#detailExtraLabel').textContent = `+${fmt(+slider.value)}/mo`;
+    updateDetailPayoff(d, +slider.value);
+  });
+  updateDetailPayoff(d, 0);
+  $('#detailDialog').showModal();
+}
+
+function updateDetailPayoff(d, extraOnThis) {
+  const box = $('#detailPayoff');
+  const a = amortize(d, extraOnThis);
+  const baseA = amortize(d, 0);
+  if (a.stalled) {
+    box.innerHTML = `<div class="insight" style="background:#2b2410;border-color:#4d3f12;color:var(--warn)">⚠️ This payment doesn't cover the interest — the balance never clears. Increase it (or set an APR/payment via Edit).</div>`;
+    return;
+  }
+  const monthsSaved = baseA.months - a.months;
+  const interestSaved = baseA.totalInterest - a.totalInterest;
+  const summary = extraOnThis > 0
+    ? `Debt-free in <strong>${humanMonths(a.months)}</strong> (${dateAfter(a.months)}), <strong>${fmt(a.totalInterest)}</strong> interest — that's ${humanMonths(monthsSaved)} sooner and <strong>${fmt(interestSaved)}</strong> saved vs. minimum only.`
+    : `At the ${fmt2(d.minPayment)} minimum: debt-free in <strong>${humanMonths(a.months)}</strong> (${dateAfter(a.months)}), <strong>${fmt(a.totalInterest)}</strong> total interest. Drag the slider to throw extra at it.`;
+
+  box.innerHTML = `<div class="insight" style="background:var(--card-2);border-color:var(--border)">${summary}</div>
+    ${miniBalanceChart(a.rows, d.balance)}
+    <details style="margin-top:8px"><summary>Month-by-month schedule</summary>
+      <table class="scenario"><thead><tr><th>#</th><th>Payment</th><th>Interest</th><th>Principal</th><th>Balance</th></tr></thead>
+      <tbody>${a.rows.slice(0, 360).map((r) => `<tr><td>${r.month}</td><td>${fmt2(r.payment)}</td><td>${fmt2(r.interest)}</td><td>${fmt2(r.principal)}</td><td>${fmt2(r.balance)}</td></tr>`).join('')}</tbody></table>
+    </details>`;
+}
+
+// Single-debt amortization at minPayment + extra.
+function amortize(debt, extraOnThis) {
+  const d = { balance: debt.balance };
+  const payment = (debt.minPayment || 0) + Math.max(0, extraOnThis);
+  const rate = debt.apr / 100 / 12;
+  const rows = [];
+  let month = 0, totalInterest = 0;
+  const MAX = 1200;
+  while (d.balance > 0.005 && month < MAX) {
+    month++;
+    const interest = d.balance * rate;
+    const pay = Math.min(payment, d.balance + interest);
+    const principal = pay - interest;
+    if (principal <= 0) return { rows, months: month, totalInterest, stalled: true, payment };
+    d.balance = d.balance + interest - pay;
+    totalInterest += interest;
+    rows.push({ month, payment: pay, interest, principal, balance: Math.max(0, d.balance) });
+  }
+  return { rows, months: month, totalInterest, stalled: month >= MAX, payment };
+}
+
+// Compact balance-over-time SVG for a single debt.
+function miniBalanceChart(rows, startBalance) {
+  if (!rows.length) return '';
+  const W = 500, H = 120, P = { l: 48, r: 10, t: 8, b: 18 };
+  const maxM = rows.length, maxB = startBalance || 1;
+  const x = (m) => P.l + (m / maxM) * (W - P.l - P.r);
+  const y = (b) => P.t + (1 - b / maxB) * (H - P.t - P.b);
+  const pts = [{ month: 0, balance: startBalance }, ...rows];
+  const path = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.month).toFixed(1)} ${y(p.balance).toFixed(1)}`).join(' ');
+  let grid = '';
+  for (let i = 0; i <= 2; i++) {
+    const val = (maxB / 2) * i, yy = y(val);
+    grid += `<line x1="${P.l}" y1="${yy}" x2="${W - P.r}" y2="${yy}" class="grid"/><text x="${P.l - 6}" y="${yy + 4}" class="axis" text-anchor="end">${fmtShort(val)}</text>`;
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart" style="margin-top:8px">${grid}<path d="${path}" class="line-accent"/></svg>`;
+}
+
+// Payments toward a debt, inferred from transactions.
+function paymentHistory(d) {
+  const rel = relatedTransactions(d);
+  // Credit accounts: payments are inflows (+). Loans: matched payment transfers.
+  const list = rel.filter((t) => t.amount > 0 || /payment|autopay|transfer to loan/i.test(t.description))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
+  const yr = new Date().getFullYear();
+  const thisYear = list.filter((t) => t.date.startsWith(String(yr))).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const avg = list.length ? list.reduce((s, t) => s + Math.abs(t.amount), 0) / list.length : 0;
+  return { list, thisYear, avg };
+}
+
+// Generic transaction drill-down (used by the budget charts).
+function openTxList(title, txs) {
+  const out = txs.reduce((s, t) => (t.amount < 0 ? s + Math.abs(t.amount) : s), 0);
+  const inc = txs.reduce((s, t) => (t.amount > 0 ? s + t.amount : s), 0);
+  detailDebtId = null;
+  $('#detailEditBtn').style.display = 'none';
+  $('#detailContent').innerHTML = `
+    <div class="detail-head"><h3>${escapeHtml(title)}</h3>
+      <div class="sub">${txs.length} transaction${txs.length === 1 ? '' : 's'}${out ? ` · ${fmt(out)} out` : ''}${inc ? ` · ${fmt(inc)} in` : ''}</div></div>
+    <div class="detail-tx schedule" style="max-height:55vh">
+      ${txs.slice(0, 400).map((t) => `<div class="item"><span>${t.date} · ${escapeHtml(t.description)} <span class="pill">${escapeHtml(catOf(t))}</span></span><span class="when" style="color:${t.amount < 0 ? 'var(--danger)' : 'var(--accent)'}">${t.amount < 0 ? '-' : '+'}${fmt2(Math.abs(t.amount))}</span></div>`).join('') || '<p class="muted small">No transactions.</p>'}
+    </div>`;
+  $('#detailDialog').showModal();
+}
+
+// Transactions tied to a debt: same Plaid account, or its mask in the description.
+function relatedTransactions(d) {
+  return transactions
+    .filter((t) => (d.account_id && t.account_id === d.account_id) || (d.mask && t.description.includes(d.mask)))
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
 function renderPlan() {
@@ -1213,8 +1723,8 @@ function renderRecommendations() {
 function monthlySurplus() {
   if (!transactions.length) return 0;
   const months = monthSpan();
-  const income = transactions.filter((t) => t.category !== 'Transfer' && t.category !== 'Debt payment' && t.amount > 0).reduce((s, t) => s + t.amount, 0);
-  const spend = transactions.filter((t) => t.category !== 'Transfer' && t.category !== 'Debt payment' && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const income = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   return Math.max(0, Math.floor(((income - spend) / months) / 5) * 5);
 }
 
@@ -1225,7 +1735,7 @@ function biggestDiscretionaryCut() {
   const discretionary = new Set(['Dining', 'Shopping', 'Subscriptions', 'Transport', 'Gas']);
   const byCat = {};
   for (const t of transactions) {
-    if (t.amount < 0 && discretionary.has(t.category)) byCat[t.category] = (byCat[t.category] || 0) + Math.abs(t.amount);
+    if (t.amount < 0 && discretionary.has(catOf(t))) byCat[catOf(t)] = (byCat[catOf(t)] || 0) + Math.abs(t.amount);
   }
   const top = Object.entries(byCat).sort((a, b) => b[1] - a[1])[0];
   if (!top) return null;

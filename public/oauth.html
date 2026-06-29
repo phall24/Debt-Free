@@ -18,6 +18,14 @@
     // with an oauth_state_id in the URL. We resume the SAME Link session using
     // the link_token we stashed before redirecting, then hand the result back
     // to the main app.
+    // Skip ngrok's free-tier browser interstitial on our own API calls.
+    const _fetch = window.fetch.bind(window);
+    window.fetch = (url, opts = {}) => {
+      if (typeof url === 'string' && url.startsWith('/')) {
+        opts = { ...opts, headers: { ...(opts.headers || {}), 'ngrok-skip-browser-warning': 'true' } };
+      }
+      return _fetch(url, opts);
+    };
     (function () {
       const token = localStorage.getItem('plaidLinkToken');
       const owner = localStorage.getItem('plaidOwner') || 'Me';

@@ -162,6 +162,7 @@ app.get('/api/liabilities', async (req, res) => {
             source: 'plaid',
             institution,
             owner,
+            account_id: acct.account_id,
             name: acct.name,
             type: acct.subtype || 'checking',
             balance: acct.balances?.available ?? acct.balances?.current ?? 0,
@@ -175,6 +176,7 @@ app.get('/api/liabilities', async (req, res) => {
           source: 'plaid',
           institution,
           owner,
+          account_id: card.account_id,
           name: nameOf(card.account_id),
           type: 'credit card',
           balance: acct?.balances?.current ?? 0,
@@ -190,6 +192,7 @@ app.get('/api/liabilities', async (req, res) => {
           source: 'plaid',
           institution,
           owner,
+          account_id: loan.account_id,
           name: nameOf(loan.account_id),
           type: 'student loan',
           balance: accounts.find((a) => a.account_id === loan.account_id)?.balances?.current ?? 0,
@@ -203,12 +206,41 @@ app.get('/api/liabilities', async (req, res) => {
           source: 'plaid',
           institution,
           owner,
+          account_id: mort.account_id,
           name: nameOf(mort.account_id),
           type: 'mortgage',
           balance: accounts.find((a) => a.account_id === mort.account_id)?.balances?.current ?? 0,
           apr: mort.interest_rate?.percentage ?? 0,
           minPayment: mort.next_monthly_payment ?? 0,
         });
+      }
+
+      // Auto/personal loans: Plaid's Liabilities product doesn't return their
+      // terms, but the loan account itself shows up. Surface it as a debt with
+      // the balance; APR/payment are left for the user to fill in.
+      const coveredIds = new Set([
+        ...(liabilities.credit ?? []).map((c) => c.account_id),
+        ...(liabilities.student ?? []).map((l) => l.account_id),
+        ...(liabilities.mortgage ?? []).map((m) => m.account_id),
+      ]);
+      for (const acct of accounts) {
+        if (acct.type === 'loan' && !coveredIds.has(acct.account_id)) {
+          debts.push({
+            source: 'plaid',
+            institution,
+            owner,
+            account_id: acct.account_id,
+            mask: acct.mask || null,
+            name: acct.name,
+            type: (acct.subtype || 'loan').replace(/_/g, ' '),
+            balance: acct.balances?.current ?? 0,
+            apr: 0,
+            minPayment: 0,
+            creditLimit: null,
+            dueDate: null,
+            needsTerms: true, // UI hint: APR/payment unknown, ask user to set
+          });
+        }
       }
     } catch (err) {
       errors.push({ institution, owner, message: err.response?.data?.error_message ?? err.message });
@@ -238,6 +270,7 @@ app.get('/api/transactions', async (req, res) => {
             description: t.merchant_name || t.name,
             amount: -t.amount, // Plaid: positive = money OUT; this app: positive = money IN
             category: mapPlaidCategory(t.personal_finance_category?.primary),
+            account_id: t.account_id,
             owner,
           });
         }

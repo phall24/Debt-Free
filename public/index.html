@@ -24,6 +24,7 @@
           <button id="refreshBtn" class="ghost" title="Re-pull balances from linked banks">↻ Refresh</button>
           <button id="uploadBtn" class="ghost">⬆ Upload statement</button>
           <button id="addManualBtn" class="ghost">＋ Add manually</button>
+          <button id="restoreHiddenBtn" class="ghost" hidden></button>
         </div>
         <input type="file" id="statementFile" accept=".pdf,.csv" multiple hidden />
       </div>
@@ -142,21 +143,42 @@
         and import it to see income, spending by category, and monthly trends. Parsed in your browser — nothing is uploaded.
       </p>
       <div id="budgetView" hidden>
+        <!-- Drill-down filters -->
+        <div class="budget-filters">
+          <label>Month <select id="filterMonth"></select></label>
+          <label>Who <select id="filterOwner"></select></label>
+          <button id="budgetTargetsBtn" class="ghost">🎯 Set budget targets</button>
+        </div>
+
         <div class="stats" id="budgetStats"></div>
+
+        <div id="insightCallouts"></div>
+
         <div class="analytics-grid" style="margin-top:16px">
           <div class="chart-box">
             <h3>Spending by category</h3>
-            <p class="muted small">Where your money went over the imported period.</p>
+            <p class="muted small">Bars show spend; the line marks your monthly budget target if set.</p>
             <div id="catChart"></div>
           </div>
           <div class="chart-box">
+            <h3>Top merchants</h3>
+            <p class="muted small">Where your money actually goes.</p>
+            <div id="merchantChart"></div>
+          </div>
+          <div class="chart-box">
+            <h3>🔁 Recurring charges</h3>
+            <p class="muted small">Likely subscriptions/bills — prime candidates to cut for debt.</p>
+            <div id="recurringList"></div>
+          </div>
+          <div class="chart-box">
             <h3>Monthly income vs spending</h3>
-            <p class="muted small">Green above the line is money you could put toward debt.</p>
+            <p class="muted small">Green above red is money you could put toward debt.</p>
             <div id="trendChart"></div>
           </div>
         </div>
+
         <details>
-          <summary>All transactions (<span id="txCount">0</span>)</summary>
+          <summary>All transactions (<span id="txCount">0</span>) — click a category to change it</summary>
           <div class="row" style="gap:8px;margin:10px 0">
             <input id="txSearch" placeholder="Search transactions…" style="flex:1" />
           </div>
@@ -165,6 +187,28 @@
       </div>
     </section>
   </main>
+
+  <!-- Debt / account detail drill-down -->
+  <dialog id="detailDialog">
+    <div id="detailContent"></div>
+    <div class="row spread" style="margin-top:16px">
+      <button class="ghost" id="detailEditBtn">Edit</button>
+      <button class="primary" id="detailCloseBtn">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Budget targets modal -->
+  <dialog id="targetsDialog">
+    <form method="dialog" id="targetsForm">
+      <h3>Monthly budget targets</h3>
+      <p class="muted small">Set a monthly limit per category. Leave blank for no target. Spending is compared to these.</p>
+      <div id="targetsFields"></div>
+      <div class="row spread">
+        <button value="cancel" class="ghost" formnovalidate>Close</button>
+        <button value="save" class="primary">Save targets</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Account add/edit modal -->
   <dialog id="accountDialog">

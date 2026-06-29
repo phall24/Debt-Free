@@ -181,6 +181,37 @@ table.scenario th { color: var(--muted); font-weight: 600; }
 table.scenario tr.now { background: #14271a; }
 table.scenario tr.now td { color: var(--accent); font-weight: 600; }
 
+/* ---- Detail drill-down ---- */
+#detailDialog { width: min(560px, 94vw); }
+.detail-head h3 { margin: 0 0 2px; }
+.detail-head .sub { color: var(--muted); font-size: 0.85rem; }
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin: 16px 0; }
+.detail-grid .cell { background: var(--card-2); border-radius: 8px; padding: 10px 12px; }
+.detail-grid .cell .k { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: .04em; }
+.detail-grid .cell .v { font-size: 1.1rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.detail-section { margin-top: 14px; }
+.detail-section h4 { margin: 0 0 6px; font-size: 0.95rem; }
+.detail-tx { max-height: 220px; overflow-y: auto; }
+.clickable { cursor: pointer; }
+.clickable:hover { outline: 1px solid var(--accent-2); outline-offset: -1px; }
+.row-actions button { position: relative; z-index: 2; }
+
+/* ---- Budget extras ---- */
+.budget-filters { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+.budget-filters label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.budget-filters select { min-width: 150px; }
+.insight { padding: 10px 14px; border-radius: 8px; background: #14271a; border: 1px solid #1f4427; font-size: 0.9rem; margin-top: 12px; }
+.insight + .insight { margin-top: 8px; }
+.recurring-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+.recurring-row:last-child { border-bottom: none; }
+.recurring-row .freq { color: var(--muted); font-size: 0.78rem; }
+.cat-pill-select { font-size: 0.72rem; background: #2d3748; color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 1px 6px; cursor: pointer; }
+.target-line { stroke: var(--warn); stroke-width: 2; stroke-dasharray: 3 2; }
+#targetsFields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; max-height: 50vh; overflow-y: auto; }
+#targetsFields label { display: flex; flex-direction: column; gap: 2px; font-size: 0.82rem; }
+.over-budget { color: var(--danger); font-weight: 600; }
+.under-budget { color: var(--accent); }
+
 /* ---- Analytics ---- */
 .analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
 .chart-box { background: var(--card-2); border-radius: 10px; padding: 16px; }
