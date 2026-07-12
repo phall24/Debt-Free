@@ -74,9 +74,10 @@ main {
 }
 
 /* Bill calendar grid */
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-top: 10px; }
-.cal-head { text-align: center; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 0; }
-.cal-day { min-height: 78px; background: var(--card-2); border: 1px solid var(--border); border-radius: 7px; padding: 4px 5px; font-size: 0.72rem; overflow: hidden; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 7px; margin-top: 12px; }
+.cal-head { text-align: center; font-size: 0.74rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; padding: 4px 0; }
+.cal-day { min-height: 104px; background: var(--card-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px 7px; font-size: 0.74rem; overflow: hidden; }
+.cal-day .cal-payday, .cal-day .cal-bill { margin-top: 3px; padding: 2px 4px; line-height: 1.35; }
 .cal-day.dim { background: transparent; border-color: transparent; }
 .cal-day.today { border-color: var(--accent); }
 .cal-daynum { font-weight: 700; color: var(--muted); margin-bottom: 2px; }

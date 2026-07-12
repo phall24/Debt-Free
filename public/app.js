@@ -68,6 +68,7 @@ async function init() {
   // module-level `let` state is initialized.)
   if (!localStorage.getItem('seededPlanned')) {
     plannedExpenses.push({ id: cryptoId(), name: 'Competitive soccer (son)', amount: 500 });
+    plannedExpenses.push({ id: cryptoId(), name: 'Kids / unexpected (cushion)', amount: 300 });
     savePlanned();
     localStorage.setItem('seededPlanned', '1');
   }
@@ -2284,14 +2285,11 @@ function renderSmartInsights() {
   renderSpendTrends();
 }
 
-// Project checking balance day-by-day using paydays + bills; warn of shortfalls.
-function renderCashflowForecast() {
-  const box = $('#cashflowForecast');
-  if (!box) return;
+// One source of truth for the cash-flow projection + recommended set-aside, so
+// the forecast nudge and the game plan quote the SAME hold-back number.
+function computeCashflow() {
   const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0)
     || accounts.reduce((s, a) => s + (a.balance || 0), 0);
-  if (!accounts.length) { box.innerHTML = '<p class="muted small">Add your checking balance (in Accounts) to forecast whether you\'ll make it to the next paycheck.</p>'; return; }
-
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const end = new Date(today.getTime() + 35 * 86400000);
   const paydays = projectPaydays(today, end);
@@ -2309,6 +2307,20 @@ function renderCashflowForecast() {
     series.push({ date: new Date(d), bal });
     if (bal < minBal) { minBal = bal; minDate = new Date(d); }
   }
+  // Recommended set-aside = enough to bring the projected low back to a ~$500
+  // cushion (matches the advisor's more-conservative number on a thin buffer).
+  const holdBack = minBal < 0 ? Math.ceil((Math.abs(minBal) + 500) / 50) * 50 : 0;
+  const prevPay = paydays.filter((p) => p.date <= minDate).slice(-1)[0] || null;
+  return { checking, today, end, series, minBal, minDate, holdBack, prevPay, hasAccounts: accounts.length > 0 };
+}
+
+// Project checking balance day-by-day using paydays + bills; warn of shortfalls.
+function renderCashflowForecast() {
+  const box = $('#cashflowForecast');
+  if (!box) return;
+  const cf = computeCashflow();
+  if (!cf.hasAccounts) { box.innerHTML = '<p class="muted small">Add your checking balance (in Accounts) to forecast whether you\'ll make it to the next paycheck.</p>'; return; }
+  const { checking, today, end, series, minBal, minDate, holdBack, prevPay } = cf;
   const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const color = minBal < 0 ? 'var(--danger)' : minBal < 500 ? 'var(--warn)' : 'var(--accent)';
   const banner = minBal < 0
@@ -2320,15 +2332,13 @@ function renderCashflowForecast() {
   // ---- "What would fix this" nudge ----
   let fix = '';
   if (minBal < 0) {
-    const gap = Math.ceil(Math.abs(minBal) / 50) * 50 + 50; // shortfall + $50 safety
-    const prevPay = paydays.filter((p) => p.date <= minDate).slice(-1)[0];
     const leak = smallLeakMonthly();
-    const btn = `<button class="primary" id="cfHoldBtn" style="margin-top:8px">Set aside ${fmt(gap)} — lower my extra payment</button>`;
+    const btn = `<button class="primary" id="cfHoldBtn" style="margin-top:8px">Set aside ${fmt(holdBack)} — lower my extra payment</button>`;
     fix = `<div class="rec info" style="grid-template-columns:1fr;margin-top:10px"><div class="rec-main">
       <div class="rec-title">💡 What would fix this</div>
       <div class="rec-detail muted small">
-        Keep <strong>${fmt(gap)}</strong> in checking${prevPay ? ` from your ${fmtD(prevPay.date)} paycheck` : ''} instead of sending it to debt this cycle — that carries you through ${fmtD(minDate)} to your next check.
-        ${leak >= gap ? ` Or reclaim it painlessly: you spend ~${fmt(leak)}/mo on small leaks (eating out/delivery) — trimming ${fmt(gap)} there covers the whole gap.` : ` Trimming small leaks (~${fmt(leak)}/mo) chips away at it too.`}
+        Keep <strong>${fmt(holdBack)}</strong> in checking${prevPay ? ` from your ${fmtD(prevPay.date)} paycheck` : ''} instead of sending it to debt this cycle — that carries you through ${fmtD(minDate)} to your next check with a small cushion.
+        ${leak >= holdBack ? ` Or reclaim it painlessly: you spend ~${fmt(leak)}/mo on small leaks (eating out/delivery) — trimming ${fmt(holdBack)} there covers the whole gap.` : ` Trimming small leaks (~${fmt(leak)}/mo) chips away at it too.`}
       </div>${btn}</div></div>`;
   }
 
@@ -2346,9 +2356,8 @@ function renderCashflowForecast() {
   // The fix button lowers the extra debt payment by the shortfall so you don't
   // over-commit cash you actually need to get through the pay period.
   $('#cfHoldBtn')?.addEventListener('click', () => {
-    const gap = Math.ceil(Math.abs(minBal) / 50) * 50 + 50;
     const cur = parseFloat($('#extra').value) || 0;
-    $('#extra').value = Math.max(0, cur - gap);
+    $('#extra').value = Math.max(0, cur - holdBack);
     render();
     $('#resultsCard')?.scrollIntoView({ behavior: 'smooth' });
   });
@@ -3022,6 +3031,29 @@ function renderGamePlan() {
       ? '✅ Buffer built — safe to max-attack the 28% cards.'
       : `Build this <strong>first</strong>, fed by ~${fmt(smallLeakMonthly())}/mo of small leaks. The ~6–8 week pause costs only tens of dollars in interest and ends the overdrafts.`}</p>`;
 
+  // ---- Safe to spend this month (the simple "am I on budget?" answer) ----
+  const income = verifiedMonthlyIncome();
+  const debtMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
+  const byCat = monthlyByCategory();
+  const fixedBills = ['Housing', 'Utilities', 'Insurance', 'Subscriptions'].reduce((s, c) => s + (byCat[c] || 0), 0);
+  const bufferPush = built ? 0 : Math.min(2000, Math.max(0, bufferTarget - checking));
+  const allowance = Math.max(0, income - debtMin - plannedTotal() - fixedBills - bufferPush);
+  const perWeek = Math.floor(allowance / 4.3 / 10) * 10;
+  const ym = new Date().toISOString().slice(0, 7);
+  const flexCats = new Set(['Groceries', 'Gas', 'Dining', 'Shopping', 'Travel', 'Transport', 'Health', 'Cash', 'Other']);
+  const spent = transactions.filter((t) => t.date.slice(0, 7) === ym && t.amount < 0 && flexCats.has(catOf(t))).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const now = new Date();
+  const dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const expected = allowance * (now.getDate() / dim);
+  const barCol = spent > allowance ? 'var(--danger)' : spent > expected * 1.05 ? 'var(--warn)' : 'var(--accent)';
+  const status = spent > allowance ? '🚨 Over budget — ease off dining/shopping.' : spent > expected * 1.05 ? '⚠️ Spending a bit fast for this point in the month.' : '✅ On track.';
+  $('#safeToSpend').innerHTML = `<div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
+    <div class="rec-title">💰 This month you can spend ${fmt(allowance)} on everyday stuff — about ${fmt(perWeek)}/week</div>
+    <div class="rec-detail muted small">After debt payments (${fmt(debtMin)}), fixed bills (${fmt(fixedBills)}), soccer + kid cushion (${fmt(plannedTotal())})${bufferPush ? `, and ${fmt(bufferPush)} toward your buffer` : ''}. Covers groceries, gas, dining, shopping — the stuff you control.</div>
+    <div class="bar-row" style="grid-template-columns:1fr 150px;margin-top:8px"><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, Math.round(spent / (allowance || 1) * 100))}%;background:${barCol}"></div></div><span class="bar-val" style="color:${barCol}">${fmt(spent)} spent</span></div>
+    <div class="muted small" style="margin-top:2px">${status} <strong>${fmt(Math.max(0, allowance - spent))}</strong> left for the rest of ${now.toLocaleDateString('en-US', { month: 'long' })}.</div>
+  </div></div>`;
+
   // Which day the auto payments hit, and how much.
   const autoDoms = autoLoans().map((d) => d.dueDate).filter(Boolean).map((x) => new Date(x + 'T00:00:00').getDate());
   const autoDom = autoDoms.length ? Math.min(...autoDoms) : null;
@@ -3039,9 +3071,10 @@ function renderGamePlan() {
   }
   events.sort((a, b) => (a.dom || 99) - (b.dom || 99));
 
+  const cf = computeCashflow();
   const jobFor = (e) => {
     if (e.biweekly) return { txt: 'Covers day-to-day spending between the big checks.', c: '' };
-    if (autoDom && e.dom < autoDom && autoDom - e.dom <= 7) return { txt: `🚗 <strong>HOLD</strong> — covers the ${fmt(autoTotal)} auto payments on the ${ordinal(autoDom)} + tops up your buffer. Do NOT send this one to debt.`, c: 'var(--warn)' };
+    if (autoDom && e.dom < autoDom && autoDom - e.dom <= 7) return { txt: `🚗 <strong>HOLD${cf.holdBack ? ` ~${fmt(cf.holdBack)}` : ''}</strong> — keep it in checking to cover the ${fmt(autoTotal)} auto payments on the ${ordinal(autoDom)} and stay positive to your next check. Do NOT send this one to debt.`, c: 'var(--warn)' };
     if (!built) return { txt: '🛡️ Send the surplus to your checking buffer until it hits the goal.', c: '' };
     return { txt: '⚔️ Attack the cards — extra goes to your top card (Marriott/Citi/Blue Cash).', c: 'var(--accent)' };
   };
@@ -3196,10 +3229,6 @@ function downloadMonthlyPackage() {
   const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([c, v]) => `<tr><td>${escapeHtml(c)}</td><td class="r out">${money(v)}</td></tr>`).join('');
   const totalSpent = Object.values(byCat).reduce((s, v) => s + v, 0);
 
-  // Every transaction, line by line.
-  const txRows = monthTx.map((t) => `<tr><td>${t.date}</td><td>${escapeHtml(t.description)}</td><td>${escapeHtml(catOf(t))}</td><td class="r ${t.amount < 0 ? 'out' : 'in'}">${money(t.amount)}</td></tr>`).join('')
-    || '<tr><td colspan="4"><em>No imported transactions for this month.</em></td></tr>';
-
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Monthly Package — ${monthName}</title>
 <style>body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:820px;margin:26px auto;padding:0 18px;color:#161616;line-height:1.45}
 h1{margin:0}h2{margin:22px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}.muted{color:#666;font-size:13px}
@@ -3226,9 +3255,6 @@ ${cal}
 <table><tr class="tot"><td>Income</td><td class="r in">${money(totalIn)}</td></tr>
 <tr><td>− Spending (actual)</td><td class="r out">${money(totalSpent)}</td></tr>
 <tr class="tot"><td>Left over</td><td class="r ${totalIn - totalSpent >= 0 ? 'in' : 'out'}">${money(totalIn - totalSpent)}</td></tr></table>
-
-<h2>📒 Every transaction (line by line)</h2>
-<table><tr><th>Date</th><th>Description</th><th>Category</th><th class="r">Amount</th></tr>${txRows}</table>
 
 <p class="muted">Generated by your Debt-Free app.</p>
 </body></html>`;
