@@ -1263,6 +1263,38 @@ function incomeFromTransactions() {
   return out;
 }
 
+// Month-over-month direction for one income source, from its deposit history.
+// Compares the most recent COMPLETE month to the average of the months before
+// it. This is what makes a raise (e.g. wife going full-time at the ISD) show up
+// as ▲ the moment the bigger paychecks post — no manual update needed.
+function incomeTrendForKey(key) {
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const byMonth = {};
+  for (const t of filteredTx()) {
+    if (t.amount <= 0) continue;
+    if (TRANSFER_RE.test(t.description) || INCOME_EXCLUDE_RE.test(t.description)) continue;
+    if (normalizeMerchant(t.description) !== key) continue;
+    const m = t.date.slice(0, 7);
+    if (m === thisMonth) continue; // ignore the in-progress month
+    byMonth[m] = (byMonth[m] || 0) + t.amount;
+  }
+  const months = Object.keys(byMonth).sort();
+  if (months.length < 2) return { dir: 'flat', pct: 0 };
+  const recent = byMonth[months[months.length - 1]];
+  const prior = months.slice(0, -1).reduce((s, m) => s + byMonth[m], 0) / (months.length - 1);
+  if (!prior) return { dir: 'flat', pct: 0 };
+  const pct = Math.round(((recent - prior) / prior) * 100);
+  if (pct >= 12) return { dir: 'up', pct };
+  if (pct <= -12) return { dir: 'down', pct };
+  return { dir: 'flat', pct };
+}
+function trendMarker(key) {
+  const t = incomeTrendForKey(key);
+  if (t.dir === 'up') return `<span title="Up ${t.pct}% vs prior months" style="color:var(--accent)">▲</span> `;
+  if (t.dir === 'down') return `<span title="Down ${Math.abs(t.pct)}% vs prior months" style="color:var(--warn)">▼</span> `;
+  return '';
+}
+
 // Merge Plaid income streams with transaction-detected recurring deposits,
 // deduping by normalized merchant (a payer Plaid already found isn't re-added).
 function incomeSources() {
@@ -1297,7 +1329,7 @@ function renderIncome() {
       const tag = r.nextDate ? ` · next ${r.nextDate}` : (r.detected ? ' · detected' : '');
       return `
       <div class="recurring-row">
-        <span>${escapeHtml(r.description)}</span>
+        <span>${trendMarker(r.key)}${escapeHtml(r.description)}</span>
         <span class="freq">${freq}${tag}</span>
         <span class="bar-val" style="color:var(--accent)">${fmt2(r.monthlyAmount)}/mo</span>
       </div>`;
@@ -1639,7 +1671,8 @@ function renderDashIncome(income, plan, extra) {
   const target = minTotal + autoMin + extra;
   const headroom = income - target;
   const surplus = monthlySurplus();
-  const auraDown = incomeSources().some((s) => /aura/i.test(s.description));
+  const aura = incomeSources().find((s) => /aura/i.test(s.description));
+  const auraDown = aura && incomeTrendForKey(aura.key).dir === 'down';
   $('#dashIncome').innerHTML = `
     <div class="recurring-row" style="font-weight:600"><span>${fmt(income)}/mo income</span><span class="muted small">verified</span><span></span></div>
     <div class="recurring-row"><span>Plan needs (mins + extra)</span><span></span><span class="bar-val">${fmt(target)}/mo</span></div>
