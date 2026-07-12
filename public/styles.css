@@ -85,6 +85,20 @@ main {
 .cal-bill { background: #3a1d22; color: #f2c0c6; border-radius: 4px; padding: 1px 4px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-bill.pay { background: #3d3410; color: var(--warn); }
 
+/* Undo toast */
+.toast {
+  position: fixed; left: 50%; bottom: 24px;
+  transform: translateX(-50%) translateY(12px);
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 18px; display: flex; align-items: center; gap: 16px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45); z-index: 9999;
+  opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s;
+  font-size: 0.92rem; max-width: 92vw;
+}
+.toast.show { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.toast-action { background: transparent; border: none; color: var(--accent); font-weight: 700; cursor: pointer; padding: 4px 8px; font-size: 0.92rem; }
+.toast-action:hover { text-decoration: underline; }
+
 /* Only the debt name opens the detail popup (prevents accidental modal opens). */
 .detail-link { cursor: pointer; display: inline-block; }
 .detail-link:hover { text-decoration: underline; }

@@ -506,7 +506,7 @@ function onDialogSubmit(e) {
 function deleteDebt(id) {
   const d = debts.find((x) => x.id === id);
   // Hide Plaid debts directly (no confirm popup — it's reversible via "Restore
-  // hidden", and a native confirm() can be permanently suppressed by the
+  // hidden" / Undo, and a native confirm() can be permanently suppressed by the
   // browser's "prevent this page from creating dialogs" checkbox).
   if (d.source === 'plaid' && d.account_id) { excludedKeys.add(d.account_id); saveExcluded(); }
   // Auto-detected debt: remember the removal so we don't re-add it next refresh.
@@ -517,7 +517,33 @@ function deleteDebt(id) {
   debts = debts.filter((x) => x.id !== id);
   if (d.source === 'manual') saveManualDebts();
   render();
+  showToast(`Removed “${d.name}”`, 'Undo', () => undoDeleteDebt(d));
 }
+
+// Reverse a removal (restore the exact debt and un-hide/un-dismiss it).
+function undoDeleteDebt(d) {
+  if (d.source === 'plaid' && d.account_id) { excludedKeys.delete(d.account_id); saveExcluded(); }
+  if (d.autoDetected && d.autoKey) {
+    dismissedDebtHints = dismissedDebtHints.filter((k) => k !== d.autoKey);
+    localStorage.setItem('dismissedDebtHints', JSON.stringify(dismissedDebtHints));
+  }
+  if (!debts.some((x) => x.id === d.id)) debts.push(d);
+  if (d.source === 'manual') saveManualDebts();
+  render();
+}
+
+// ---- Toast (transient message with an optional action) -----------------------
+let _toastTimer = null;
+function showToast(message, actionLabel, actionFn) {
+  const el = $('#toast');
+  if (!el) return;
+  el.innerHTML = `<span>${escapeHtml(message)}</span>${actionLabel ? `<button class="toast-action">${escapeHtml(actionLabel)}</button>` : ''}`;
+  el.classList.add('show');
+  if (actionFn) el.querySelector('.toast-action').addEventListener('click', () => { actionFn(); hideToast(); });
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(hideToast, 6000);
+}
+function hideToast() { $('#toast')?.classList.remove('show'); }
 
 // ===========================================================================
 // Statement upload: read a PDF/CSV statement in-browser, auto-detect the
