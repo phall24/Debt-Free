@@ -2368,7 +2368,13 @@ function renderPaycheckPlan(paydays, bills, today) {
   <div class="muted small" style="margin:4px 0 6px"><strong>The actual timing</strong> (uneven — the buffer smooths it):</div>`;
 
   let running = checking; // carry balance forward, starting from today's checking
-  const dailyBurn = monthlyExpenses() / 30.4;
+  // Daily "living" = variable spend only (groceries/gas/dining). The recurring
+  // bills (utilities, subscriptions) are already shown as line items, so exclude
+  // them here or they'd be double-counted and paint everything red.
+  const recurringBillsMonthly = recurringStreams
+    .filter((s) => !INTEREST_RE.test(s.description) && !FEE_RE.test(s.description))
+    .reduce((s, st) => s + (st.monthlyAmount || 0), 0);
+  const dailyBurn = Math.max(0, monthlyExpenses() - recurringBillsMonthly) / 30.4;
   box.innerHTML = leveled + real.slice(0, 4).map((p, i) => {
     // Period ends at the NEXT real paycheck (from the full list, so the last
     // shown period doesn't vacuum up every future bill).
