@@ -82,6 +82,7 @@ async function init() {
   // any detected untracked debts and re-render.
   if (plaidConfigured) pullRecurring().then(() => {
     syncAutoDetectedDebts();
+    inferDueDates();
     seedPaySchedule();
     // Default Smart plan funds itself from the (now-computable) free cash.
     if ($('#strategy').value === 'custom') $('#extra').value = monthlySurplus();
@@ -90,7 +91,7 @@ async function init() {
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
-  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) { await pullRecurring(); syncAutoDetectedDebts(); } render(); });
+  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) { await pullRecurring(); syncAutoDetectedDebts(); inferDueDates(); } render(); });
   $('#addManualBtn').addEventListener('click', () => openDialog());
   $('#restoreHiddenBtn').addEventListener('click', restoreHidden);
   $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
@@ -264,8 +265,45 @@ async function pullPlaidDebts() {
     }
     await pullPlaidTransactions();
     inferLoanPayments();
+    inferDueDates();
   } catch (err) {
     console.error(err);
+  }
+}
+
+// Transactions that look like PAYMENTS toward a given debt.
+function paymentTxnsFor(d) {
+  // Auto loans pay via generic "Transfer to Loan" — match by the inferred amount.
+  if (isAutoLoan(d) && d.minPayment) {
+    return transactions.filter((t) => t.amount < 0 && /transfer to loan/i.test(t.description)
+      && Math.abs(Math.abs(t.amount) - d.minPayment) < 2);
+  }
+  const words = (d.name || '').toLowerCase().replace(/[®™]/g, '').split(/\s+/)
+    .filter((w) => w.length > 3 && !DEBT_NAME_STOPWORDS.has(w));
+  return transactions.filter((t) => {
+    if (t.amount >= 0) return false;
+    if (d.account_id && t.account_id === d.account_id) return true;
+    if (d.mask && t.description.includes(d.mask)) return true;
+    const desc = t.description.toLowerCase();
+    return words.length > 0 && words.some((w) => desc.includes(w));
+  });
+}
+
+// For debts with no due date, infer one from the average day-of-month its
+// payments actually land (in-memory, like inferLoanPayments). A user-set due
+// date always wins. Sharpens the calendar and cash-flow forecast.
+function inferDueDates() {
+  const now = new Date();
+  const dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  for (const d of debts) {
+    if (d.dueDate) continue;
+    if (d.account_id && debtOverrides[d.account_id]?.dueDate) continue;
+    const pmts = paymentTxnsFor(d);
+    if (pmts.length < 2) continue;
+    const days = pmts.map((t) => new Date(t.date + 'T00:00:00').getDate());
+    const dom = Math.round(days.reduce((s, x) => s + x, 0) / days.length);
+    d.dueDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(Math.min(dom, dim)).padStart(2, '0')}`;
+    d.dueDateInferred = true;
   }
 }
 
@@ -2487,7 +2525,7 @@ function renderDebts() {
         <div class="name detail-link" data-detail="${d.id}" title="Click the name for details">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
         <div class="meta">
           <span class="pill">${d.autoDetected ? '🔍 auto-detected' : d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
-          ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ ${d.estimated ? 'balance &amp; APR estimated — Edit to confirm' : `click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}`}</span>` : ''}
+          ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}${d.dueDateInferred ? ' <span class="muted small">(inferred)</span>' : ''}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ ${d.estimated ? 'balance &amp; APR estimated — Edit to confirm' : `click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}`}</span>` : ''}
         </div>
         ${factLine}
       </div>
