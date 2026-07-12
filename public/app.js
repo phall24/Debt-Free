@@ -2304,10 +2304,26 @@ function renderCashflowForecast() {
   const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const color = minBal < 0 ? 'var(--danger)' : minBal < 500 ? 'var(--warn)' : 'var(--accent)';
   const banner = minBal < 0
-    ? `<div class="banner warn" style="border-color:var(--danger);color:var(--danger)">🚨 Projected to dip to <strong>${fmt(minBal)}</strong> around ${fmtD(minDate)} — hold extra debt payments until after your next paycheck, or shift a bill.</div>`
+    ? `<div class="banner warn" style="border-color:var(--danger);color:var(--danger)">🚨 Projected to dip to <strong>${fmt(minBal)}</strong> around ${fmtD(minDate)} — before your next paycheck covers it.</div>`
     : minBal < 500
       ? `<div class="banner warn">⚠️ Tight around ${fmtD(minDate)} (low of ${fmt(minBal)}). Keep a cushion before sending extra to debt.</div>`
       : `<div class="banner" style="background:#14271a;border:1px solid #1f4427;color:var(--accent)">✅ You stay above ${fmt(minBal)} through ${fmtD(end)} — safe to send extra to debt.</div>`;
+
+  // ---- "What would fix this" nudge ----
+  let fix = '';
+  if (minBal < 0) {
+    const gap = Math.ceil(Math.abs(minBal) / 50) * 50 + 50; // shortfall + $50 safety
+    const prevPay = paydays.filter((p) => p.date <= minDate).slice(-1)[0];
+    const leak = smallLeakMonthly();
+    const btn = `<button class="primary" id="cfHoldBtn" style="margin-top:8px">Set aside ${fmt(gap)} — lower my extra payment</button>`;
+    fix = `<div class="rec info" style="grid-template-columns:1fr;margin-top:10px"><div class="rec-main">
+      <div class="rec-title">💡 What would fix this</div>
+      <div class="rec-detail muted small">
+        Keep <strong>${fmt(gap)}</strong> in checking${prevPay ? ` from your ${fmtD(prevPay.date)} paycheck` : ''} instead of sending it to debt this cycle — that carries you through ${fmtD(minDate)} to your next check.
+        ${leak >= gap ? ` Or reclaim it painlessly: you spend ~${fmt(leak)}/mo on small leaks (eating out/delivery) — trimming ${fmt(gap)} there covers the whole gap.` : ` Trimming small leaks (~${fmt(leak)}/mo) chips away at it too.`}
+      </div>${btn}</div></div>`;
+  }
+
   box.innerHTML = `
     <div class="stats">
       <div class="stat"><div class="key">Checking now</div><div class="value">${fmt(checking)}</div></div>
@@ -2316,7 +2332,25 @@ function renderCashflowForecast() {
     </div>
     ${banner}
     <div class="cashflow-strip">${series.map((s) => `<div title="${fmtD(s.date)}: ${fmt(s.bal)}" style="flex:1;background:${s.bal < 0 ? 'var(--danger)' : s.bal < 500 ? 'var(--warn)' : 'var(--accent)'}"></div>`).join('')}</div>
-    <div class="muted small" style="margin-top:4px">Each bar = one day, ${fmtD(today)} → ${fmtD(end)}. Green = healthy · amber = under $500 · red = negative.</div>`;
+    <div class="muted small" style="margin-top:4px">Each bar = one day, ${fmtD(today)} → ${fmtD(end)}. Green = healthy · amber = under $500 · red = negative.</div>
+    ${fix}`;
+
+  // The fix button lowers the extra debt payment by the shortfall so you don't
+  // over-commit cash you actually need to get through the pay period.
+  $('#cfHoldBtn')?.addEventListener('click', () => {
+    const gap = Math.ceil(Math.abs(minBal) / 50) * 50 + 50;
+    const cur = parseFloat($('#extra').value) || 0;
+    $('#extra').value = Math.max(0, cur - gap);
+    render();
+    $('#resultsCard')?.scrollIntoView({ behavior: 'smooth' });
+  });
+}
+
+// Monthly spend on the "small leak" categories (eating out / delivery / snacks).
+function smallLeakMonthly() {
+  const re = /mcdonald|starbucks|chick-?fil|taco|wendy|burger|dunkin|sonic|chipotle|panera|subway|popeye|whataburger|pizza|restaurant|grill|diner|\bcafe\b|coffee|raising cane|doordash|door dash|uber ?eats|grubhub|postmates|instacart|favor|quiktrip|circle k|7-?eleven|racetrac|buc-?ee|wawa|sheetz/i;
+  const total = transactions.filter((t) => t.amount < 0 && re.test(t.description)).reduce((s, t) => s + Math.abs(t.amount), 0);
+  return total / monthSpan();
 }
 
 // Recurring charges that are NEW (started recently) or had a price hike.
