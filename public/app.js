@@ -3227,6 +3227,12 @@ function renderGamePlan() {
     <div class="muted small" style="margin-top:2px">${status} <strong>${fmt(Math.max(0, allowance - spent))}</strong> left for the rest of ${now.toLocaleDateString('en-US', { month: 'long' })}.</div>
   </div></div>`;
 
+  // The dead-simple, even version — the one thing to remember.
+  $('#gamePlanSimple').innerHTML = `<div class="rec info" style="grid-template-columns:1fr;background:#14271a;border-color:#1f4427"><div class="rec-main">
+    <div class="rec-title">🎯 The simple version — the one thing to remember</div>
+    <div class="rec-detail muted small">Live on about <strong>${fmt(perWeek)}/week</strong>. Every payday, move whatever's left ${built ? 'straight to your cards' : `to savings until your buffer hits <strong>${fmt(bufferTarget)}</strong>, then to your cards`}. Same move every check — saving runs on autopilot and the lumpy months even out.</div>
+  </div></div>`;
+
   // Which day the auto payments hit, and how much.
   const autoDoms = autoLoans().map((d) => d.dueDate).filter(Boolean).map((x) => new Date(x + 'T00:00:00').getDate());
   const autoDom = autoDoms.length ? Math.min(...autoDoms) : null;
@@ -3261,10 +3267,22 @@ function renderGamePlan() {
     </div>`;
   }).join('');
 
-  $('#gamePlanRule').innerHTML = `<div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
-    <div class="rec-title">📏 The rule (tape it to the fridge)</div>
-    <div class="rec-detail muted small">Keep <strong>${fmt(bufferTarget)}</strong> in checking. The <strong>${autoDom ? ordinal(autoDom - 1) : '20th'} paycheck rides the autos</strong> — never send it to debt until they clear. Attack the cards with your other checks. Your wife's full-time income, when it starts, goes to buffer-then-cards, not lifestyle.</div>
-  </div></div>`;
+  const holdTxt = cf.holdBack ? fmt(cf.holdBack) : 'a cushion';
+  $('#gamePlanRule').innerHTML = `
+    <div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
+      <div class="rec-title">💡 What actually fixes the month (and what doesn't)</div>
+      <div class="rec-detail muted small">
+        Paying bills <em>ahead</em> keeps you organized, but it can't close the end-of-month gap — the shortfall comes from total money in vs. out, not the order you pay them. The three levers that <strong>do</strong> fix it:
+        <ol style="margin:6px 0 0 18px;padding:0">
+          <li><strong>Hold back ${holdTxt}</strong> from the ${autoDom ? ordinal(autoDom - 1) : '20th'} check (keep it in checking, don't send to debt) so the autos and the rest of the month clear.</li>
+          <li><strong>Stay under your safe-to-spend</strong> in the tight stretch (the number up top).</li>
+          <li><strong>Build the ${fmt(bufferTarget)} buffer</strong> — once it's there, the timing never bites again.</li>
+        </ol>
+      </div></div></div>
+    <div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
+      <div class="rec-title">📏 The rule (tape it to the fridge)</div>
+      <div class="rec-detail muted small">Keep <strong>${fmt(bufferTarget)}</strong> in checking. The <strong>${autoDom ? ordinal(autoDom - 1) : '20th'} paycheck rides the autos</strong> — never send it to debt until they clear. Attack the cards with your other checks. Your wife's full-time income, when it starts, goes to buffer-then-cards, not lifestyle.</div>
+    </div></div>`;
 }
 
 // Export plan content (a <style> block + body markup) as a PDF via the browser's
