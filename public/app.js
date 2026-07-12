@@ -2341,12 +2341,21 @@ function renderPaycheckPlan(paydays, bills, today) {
   if (!box) return;
   const upcoming = paydays.filter((p) => p.date >= today).slice(0, 4);
   if (!upcoming.length) { box.innerHTML = '<p class="muted small">Connect income (or import transactions) and I\'ll map bills to each paycheck.</p>'; return; }
+  const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0) || accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const built = checking >= bufferTarget * 0.9;
   box.innerHTML = upcoming.map((p, i) => {
     const periodEnd = upcoming[i + 1] ? upcoming[i + 1].date : new Date(p.date.getTime() + cadenceDays('BIWEEKLY') * 86400000);
     const due = bills.filter((b) => b.date >= p.date && b.date < periodEnd);
     const dueTotal = due.reduce((s, b) => s + b.amount, 0);
     const left = p.amount - dueTotal;
     const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    // What to DO with the leftover — matches the game plan.
+    const hasAutos = due.some((b) => b.debt && isAutoLoan(b.debt));
+    let action;
+    if (left <= 0) action = { txt: '⚠️ Fully committed — nothing left over this check.', c: 'var(--danger)' };
+    else if (hasAutos) action = { txt: `🚗 Keep the ${fmt(left)} in checking — this check carries your auto loans. Don't send it to debt.`, c: 'var(--warn)' };
+    else if (!built) action = { txt: `🛡️ Move the ${fmt(left)} to your buffer (until it hits ${fmt(bufferTarget)}).`, c: 'var(--accent)' };
+    else action = { txt: `⚔️ Send the ${fmt(left)} to your top card.`, c: 'var(--accent)' };
     return `<div class="chart-box" style="margin-bottom:10px">
       <div class="row spread">
         <strong>💵 ${fmtD(p.date)} paycheck — ${fmt(p.amount)}</strong>
@@ -2354,9 +2363,10 @@ function renderPaycheckPlan(paydays, bills, today) {
       </div>
       ${due.length ? due.map((b) => `<div class="recurring-row"><span>${b.autopay ? '🔁 ' : b.paidEarly ? '⏩ ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · autopay' : b.paidEarly ? ' · pre-paid' : ''}</span><span class="bar-val">${fmt(b.amount)}</span></div>`).join('') : '<p class="muted small">No bills due before your next check.</p>'}
       <div class="recurring-row" style="font-weight:700;border-top:1px solid var(--border)">
-        <span>Left for debt &amp; savings</span><span></span>
+        <span>Left over</span><span></span>
         <span class="bar-val" style="color:${left >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(left)}</span>
       </div>
+      <div class="muted small" style="margin-top:5px;color:${action.c}">${action.txt}</div>
     </div>`;
   }).join('');
 }
