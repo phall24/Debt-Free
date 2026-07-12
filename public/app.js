@@ -3194,6 +3194,22 @@ function renderGamePlan() {
   const pct = Math.min(100, Math.round((checking / bufferTarget) * 100));
   const built = checking >= bufferTarget * 0.9;
   const col = built ? 'var(--accent)' : checking < bufferTarget * 0.3 ? 'var(--danger)' : 'var(--warn)';
+  // Monthly amount going to the buffer (then cards): the constant reserve.
+  const reserve = Math.min(2000, Math.max(0, monthlySurplus()));
+
+  // ---- Buffer-building finish line ----
+  let bufferProjection = '';
+  if (!built) {
+    const remaining = Math.max(0, bufferTarget - checking);
+    if (reserve > 0) {
+      const months = remaining / reserve;
+      const done = new Date(); done.setDate(done.getDate() + Math.ceil(months * 30.4));
+      bufferProjection = `<p class="muted small" style="margin-top:4px">📈 At <strong>${fmt(reserve)}/mo</strong> you'll hit <strong>${fmt(bufferTarget)}</strong> around <strong>${done.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</strong> (~${humanMonths(Math.ceil(months))}). That's when this ${fmt(reserve)}/mo flips to your cards — <strong>doubling your attack</strong> without changing your spending.</p>`;
+    } else {
+      bufferProjection = `<p class="muted small" style="margin-top:4px">Free up cash (trim the ~${fmt(smallLeakMonthly())}/mo of small leaks) to start filling the buffer.</p>`;
+    }
+  }
+
   $('#bufferStatus').innerHTML = `
     <div class="row spread"><strong>🛡️ Checking buffer</strong><span class="muted small">goal: one paycheck's cushion</span></div>
     <div class="bar-row" style="grid-template-columns:1fr 150px;margin-top:6px">
@@ -3201,18 +3217,17 @@ function renderGamePlan() {
       <span class="bar-val" style="color:${col}">${fmt(checking)} / ${fmt(bufferTarget)}</span>
     </div>
     <p class="muted small" style="margin-top:4px">${built
-      ? '✅ Buffer built — safe to max-attack the 28% cards.'
-      : `Build this <strong>first</strong>, fed by ~${fmt(smallLeakMonthly())}/mo of small leaks. The ~6–8 week pause costs only tens of dollars in interest and ends the overdrafts.`}</p>`;
+      ? '✅ Buffer built — your reserve now flows to the 28% cards.'
+      : `Build this <strong>first</strong>. The short pause costs only tens of dollars in interest and ends the overdrafts.`}</p>
+    ${bufferProjection}`;
 
   // ---- Safe to spend this month (the simple "am I on budget?" answer) ----
   const income = verifiedMonthlyIncome();
   const debtMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
   const byCat = monthlyByCategory();
   const fixedBills = ['Housing', 'Utilities', 'Insurance', 'Subscriptions'].reduce((s, c) => s + (byCat[c] || 0), 0);
-  // A CONSTANT monthly set-aside — it goes to the buffer while you're building
-  // it, then flips to the cards once it's full. Your spending budget doesn't
-  // change when the buffer fills; only where the money goes changes.
-  const reserve = Math.min(2000, Math.max(0, monthlySurplus()));
+  // `reserve` (computed above) is a CONSTANT monthly set-aside — buffer while
+  // building, then cards once full. Spending budget doesn't change on the flip.
   const reserveDest = built ? 'your cards' : 'your buffer';
   const allowance = Math.max(0, income - debtMin - plannedTotal() - fixedBills - reserve);
   const perWeek = Math.floor(allowance / 4.3 / 10) * 10;
