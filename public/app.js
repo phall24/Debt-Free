@@ -1644,8 +1644,13 @@ function renderDashIncome(income, plan, extra) {
     <div class="recurring-row" style="font-weight:600"><span>${fmt(income)}/mo income</span><span class="muted small">verified</span><span></span></div>
     <div class="recurring-row"><span>Plan needs (mins + extra)</span><span></span><span class="bar-val">${fmt(target)}/mo</span></div>
     <div class="recurring-row"><span>Headroom to go faster</span><span></span><span class="bar-val" style="color:${headroom >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(headroom)}/mo</span></div>
-    ${surplus > extra ? `<p class="muted small" style="margin-top:6px">💡 Your spending leaves ~${fmt(surplus)}/mo — you could raise your extra payment from ${fmt(extra)} toward that.</p>` : ''}
+    ${surplus > extra ? `<button class="primary" id="dashUseSurplus" style="margin-top:8px;width:100%">⚡ Put my ~${fmt(surplus)}/mo surplus toward debt</button><p class="muted small" style="margin-top:6px">Your spending leaves ~${fmt(surplus)}/mo unspent — one click sets that as your extra payment and shows how much sooner you're debt-free.</p>` : ''}
     ${auraDown ? `<p class="muted small">📌 AURAOPS income has been trending down — plan is built on the recent average. Your wife's move to full-time at Royse City ISD will add headroom automatically as it posts.</p>` : ''}`;
+  $('#dashUseSurplus')?.addEventListener('click', () => {
+    $('#extra').value = surplus;
+    render();
+    $('#resultsCard')?.scrollIntoView({ behavior: 'smooth' });
+  });
 }
 
 // ---- Upcoming payments calendar + missed-payment alerts ----------------------
