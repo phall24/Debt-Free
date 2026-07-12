@@ -505,10 +505,10 @@ function onDialogSubmit(e) {
 
 function deleteDebt(id) {
   const d = debts.find((x) => x.id === id);
-  if (d.source === 'plaid') {
-    if (!confirm(`Hide "${d.name}" from your plan? It will stay hidden even after refreshing. (Reconnecting the bank won't bring it back unless you un-hide it.)`)) return;
-    if (d.account_id) { excludedKeys.add(d.account_id); saveExcluded(); }
-  }
+  // Hide Plaid debts directly (no confirm popup — it's reversible via "Restore
+  // hidden", and a native confirm() can be permanently suppressed by the
+  // browser's "prevent this page from creating dialogs" checkbox).
+  if (d.source === 'plaid' && d.account_id) { excludedKeys.add(d.account_id); saveExcluded(); }
   // Auto-detected debt: remember the removal so we don't re-add it next refresh.
   if (d.autoDetected && d.autoKey) {
     dismissedDebtHints.push(d.autoKey);
@@ -531,10 +531,7 @@ async function onStatementUpload(e) {
   e.target.value = ''; // allow re-uploading the same file later
   if (!files.length) return;
 
-  const owner = (prompt(
-    'Whose statement(s) are these? (e.g. Me, Wife, Joint)',
-    localStorage.getItem('lastOwner') || 'Me'
-  ) || 'Me').trim();
+  const owner = 'Me'; // household-wide — we don't track who a debt belongs to
 
   let txAdded = 0, txSkipped = 0;
   let acctAdded = 0;
