@@ -28,8 +28,10 @@
         <h3>Jump to</h3>
         <a href="#dashboardCard">🎯 Dashboard</a>
         <a href="#debtsCard">💳 Debts (balances)</a>
-        <a href="#billsCard">💵 Monthly payments</a>
+        <a href="#incomeCard">💵 Income</a>
+        <a href="#billsCard">🧾 Monthly payments</a>
         <a href="#calendarCard">📅 Calendar</a>
+        <a href="#insightsCard">🔍 Smart insights</a>
         <a href="#accountsCard">🏦 Accounts</a>
         <a href="#planCard">🧭 Build plan</a>
         <a href="#recsCard">🚀 Get out sooner</a>
@@ -133,6 +135,13 @@
       </div>
     </section>
 
+    <!-- Income (money in) -->
+    <section class="card" id="incomeCard" hidden>
+      <h2>💵 Income</h2>
+      <p class="muted small">Your real take-home, detected from recurring deposits — the trustworthy base for how much you can throw at debt. Click a source to see its deposits.</p>
+      <div id="incomePanel"></div>
+    </section>
+
     <!-- Paycheck & bill calendar -->
     <section class="card" id="calendarCard" hidden>
       <div class="row spread">
@@ -151,6 +160,30 @@
       <p class="muted small">Each check, the bills due before your next one, and what's left to throw at debt.</p>
       <div id="paycheckPlan"></div>
       <details style="margin-top:12px"><summary>All upcoming due dates</summary><div id="calendarList" class="debt-list"></div></details>
+    </section>
+
+    <!-- Smart transaction insights -->
+    <section class="card" id="insightsCard" hidden>
+      <h2>🔍 Smart insights</h2>
+      <p class="muted small">What your transactions reveal — so nothing sneaks up on you.</p>
+      <div id="cashflowForecast"></div>
+      <div class="analytics-grid" style="margin-top:16px">
+        <div class="chart-box">
+          <h3>🔁 New &amp; rising subscriptions</h3>
+          <p class="muted small">Recently-started or price-hiked recurring charges — easy money to reclaim.</p>
+          <div id="subCreep"></div>
+        </div>
+        <div class="chart-box">
+          <h3>☕ Small leaks</h3>
+          <p class="muted small">The little frequent buys that add up — often the easiest cuts.</p>
+          <div id="smallLeaks"></div>
+        </div>
+        <div class="chart-box">
+          <h3>📈 Spending trends</h3>
+          <p class="muted small">Categories moving up or down vs your recent average.</p>
+          <div id="spendTrends"></div>
+        </div>
+      </div>
     </section>
 
     <!-- Plan controls -->
@@ -225,12 +258,6 @@
         </div>
 
         <div class="chart-box">
-          <h3>Debt by person</h3>
-          <p class="muted small">Each person's share of the balance, and their debt-free date.</p>
-          <div id="ownerChart"></div>
-        </div>
-
-        <div class="chart-box">
           <h3>Interest you're paying right now</h3>
           <p class="muted small">What this debt costs you every month before you pay a cent of principal.</p>
           <div id="burnChart"></div>
@@ -266,11 +293,6 @@
         <div id="insightCallouts"></div>
 
         <div class="analytics-grid" style="margin-top:16px">
-          <div class="chart-box">
-            <h3>💵 Verified income</h3>
-            <p class="muted small">Your real take-home, detected from recurring deposits — the trustworthy base for how much you can throw at debt.</p>
-            <div id="incomePanel"></div>
-          </div>
           <div class="chart-box">
             <h3>💸 Interest &amp; fees you're paying</h3>
             <p class="muted small">Money leaking straight out the door — interest charges and late/overdraft fees. Killing these is the fastest win.</p>

@@ -1453,6 +1453,8 @@ function renderIncome() {
   const box = $('#incomePanel');
   if (!box) return;
   const sources = incomeSources();
+  const card = $('#incomeCard');
+  if (card) card.hidden = !sources.length;
   if (!sources.length) {
     box.innerHTML = '<p class="muted small">No verified income yet. Connect a checking account via Plaid (or import transactions) and I\'ll detect your paychecks automatically.</p>';
     return;
@@ -1465,12 +1467,16 @@ function renderIncome() {
       const tag = r.nextDate ? ` · next ${r.nextDate}` : (r.detected ? ' · detected' : '');
       const taxFree = isTaxFreeIncome(r.description) ? ' · <span style="color:var(--accent)" title="VA disability compensation is exempt from federal income tax">🏅 tax-free</span>' : '';
       return `
-      <div class="recurring-row">
+      <div class="recurring-row clickable" data-income="${escapeHtml(r.key)}" title="Click to see these deposits">
         <span>${trendMarker(r.key)}${escapeHtml(r.description)}${taxFree}</span>
         <span class="freq">${freq}${tag}</span>
         <span class="bar-val" style="color:var(--accent)">${fmt2(r.monthlyAmount)}/mo</span>
       </div>`;
     }).join('');
+  box.querySelectorAll('[data-income]').forEach((el) => el.addEventListener('click', () => {
+    const k = el.dataset.income;
+    openTxList('Deposits', transactions.filter((t) => t.amount > 0 && normalizeMerchant(t.description) === k).sort((a, b) => (a.date < b.date ? 1 : -1)));
+  }));
 }
 
 // ---- Interest & fee tracker --------------------------------------------------
@@ -1660,7 +1666,9 @@ function render() {
   renderDebts();
   renderAccounts();
   renderBills();
+  renderIncome();
   renderPaymentCalendar();
+  renderSmartInsights();
   renderSmartPlan();
   renderPlan();
   renderRecommendations();
@@ -2216,6 +2224,163 @@ function renderPaycheckPlan(paydays, bills, today) {
       </div>
     </div>`;
   }).join('');
+}
+
+// ---- Smart transaction insights ----------------------------------------------
+function renderSmartInsights() {
+  const card = $('#insightsCard');
+  if (!card) return;
+  if (!transactions.length && !accounts.length) { card.hidden = true; return; }
+  card.hidden = false;
+  renderCashflowForecast();
+  renderSubCreep();
+  renderSmallLeaks();
+  renderSpendTrends();
+}
+
+// Project checking balance day-by-day using paydays + bills; warn of shortfalls.
+function renderCashflowForecast() {
+  const box = $('#cashflowForecast');
+  if (!box) return;
+  const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0)
+    || accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  if (!accounts.length) { box.innerHTML = '<p class="muted small">Add your checking balance (in Accounts) to forecast whether you\'ll make it to the next paycheck.</p>'; return; }
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const end = new Date(today.getTime() + 35 * 86400000);
+  const paydays = projectPaydays(today, end);
+  // Debt payments (due dates) hit on their day; everyday living expenses are
+  // spread as a daily burn so the forecast reflects real cash-out, not just bills.
+  const debtBills = billOccurrences(today, end).filter((b) => !b.autopay);
+  const dailyBurn = monthlyExpenses() / 30.4;
+  let bal = checking, minBal = checking, minDate = today;
+  const series = [];
+  for (let d = new Date(today); d <= end; d = new Date(d.getTime() + 86400000)) {
+    const key = isoLocal(d);
+    bal -= dailyBurn;
+    for (const p of paydays.filter((x) => isoLocal(x.date) === key)) bal += p.amount;
+    for (const b of debtBills.filter((x) => isoLocal(x.date) === key)) bal -= b.amount;
+    series.push({ date: new Date(d), bal });
+    if (bal < minBal) { minBal = bal; minDate = new Date(d); }
+  }
+  const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const color = minBal < 0 ? 'var(--danger)' : minBal < 500 ? 'var(--warn)' : 'var(--accent)';
+  const banner = minBal < 0
+    ? `<div class="banner warn" style="border-color:var(--danger);color:var(--danger)">🚨 Projected to dip to <strong>${fmt(minBal)}</strong> around ${fmtD(minDate)} — hold extra debt payments until after your next paycheck, or shift a bill.</div>`
+    : minBal < 500
+      ? `<div class="banner warn">⚠️ Tight around ${fmtD(minDate)} (low of ${fmt(minBal)}). Keep a cushion before sending extra to debt.</div>`
+      : `<div class="banner" style="background:#14271a;border:1px solid #1f4427;color:var(--accent)">✅ You stay above ${fmt(minBal)} through ${fmtD(end)} — safe to send extra to debt.</div>`;
+  box.innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="key">Checking now</div><div class="value">${fmt(checking)}</div></div>
+      <div class="stat"><div class="key">Lowest ahead (35 days)</div><div class="value" style="color:${color}">${fmt(minBal)}</div></div>
+      <div class="stat"><div class="key">On</div><div class="value">${fmtD(minDate)}</div></div>
+    </div>
+    ${banner}
+    <div class="cashflow-strip">${series.map((s) => `<div title="${fmtD(s.date)}: ${fmt(s.bal)}" style="flex:1;background:${s.bal < 0 ? 'var(--danger)' : s.bal < 500 ? 'var(--warn)' : 'var(--accent)'}"></div>`).join('')}</div>
+    <div class="muted small" style="margin-top:4px">Each bar = one day, ${fmtD(today)} → ${fmtD(end)}. Green = healthy · amber = under $500 · red = negative.</div>`;
+}
+
+// Recurring charges that are NEW (started recently) or had a price hike.
+function renderSubCreep() {
+  const box = $('#subCreep');
+  if (!box) return;
+  const byMerch = {};
+  for (const t of transactions) {
+    if (t.amount >= 0 || !isFlowCat(catOf(t))) continue;
+    (byMerch[normalizeMerchant(t.description)] = byMerch[normalizeMerchant(t.description)] || []).push(t);
+  }
+  const now = new Date();
+  const flags = [];
+  for (const [merchant, items] of Object.entries(byMerch)) {
+    const monthsHit = new Set(items.map((t) => t.date.slice(0, 7)));
+    if (monthsHit.size < 2) continue;
+    items.sort((a, b) => (a.date < b.date ? -1 : 1));
+    const firstAmt = Math.abs(items[0].amount);
+    const lastAmt = Math.abs(items[items.length - 1].amount);
+    if (lastAmt > 250) continue; // subscriptions, not big recurring bills
+    const daysSinceFirst = (now - new Date(items[0].date + 'T00:00:00')) / 86400000;
+    if (daysSinceFirst <= 80) flags.push({ merchant, type: 'new', amount: lastAmt });
+    else if (lastAmt >= firstAmt * 1.12 && lastAmt - firstAmt >= 2) flags.push({ merchant, type: 'hike', amount: lastAmt, from: firstAmt });
+  }
+  flags.sort((a, b) => b.amount - a.amount);
+  if (!flags.length) { box.innerHTML = '<p class="muted small">No new or rising subscriptions detected. 👍</p>'; return; }
+  box.innerHTML = flags.slice(0, 8).map((f) => `
+    <div class="recurring-row clickable" data-merch="${escapeHtml(f.merchant)}" title="Click to see these charges">
+      <span>${f.type === 'new' ? '🆕' : '⬆️'} ${escapeHtml(f.merchant)}</span>
+      <span class="freq">${f.type === 'new' ? 'new' : `up from ${fmt2(f.from)}`}</span>
+      <span class="bar-val">${fmt2(f.amount)}/mo</span>
+    </div>`).join('');
+  box.querySelectorAll('[data-merch]').forEach((el) => el.addEventListener('click', () => {
+    const m = el.dataset.merch;
+    openTxList(`${m} — charges`, transactions.filter((t) => t.amount < 0 && normalizeMerchant(t.description) === m).sort((a, b) => (a.date < b.date ? 1 : -1)));
+  }));
+}
+
+// Frequent small discretionary buys (dining out, coffee, delivery).
+function renderSmallLeaks() {
+  const box = $('#smallLeaks');
+  if (!box) return;
+  const months = monthSpan();
+  const groups = [
+    ['🍔 Eating out', /mcdonald|starbucks|chick-?fil|taco|wendy|burger|dunkin|sonic|chipotle|panera|subway|popeye|whataburger|pizza|restaurant|grill|diner|\bcafe\b|coffee|raising cane/i],
+    ['🛵 Delivery', /doordash|door dash|uber ?eats|grubhub|postmates|instacart|favor/i],
+    ['🏪 Convenience/gas snacks', /quiktrip|\bqt\b|circle k|7-?eleven|racetrac|buc-?ee|wawa|sheetz/i],
+  ];
+  const rows = groups.map(([label, re], i) => {
+    const items = transactions.filter((t) => t.amount < 0 && re.test(t.description));
+    if (!items.length) return null;
+    const total = items.reduce((s, t) => s + Math.abs(t.amount), 0);
+    return { i, label, perMo: total / months, count: Math.round(items.length / months), avg: total / items.length };
+  }).filter(Boolean).sort((a, b) => b.perMo - a.perMo);
+  if (!rows.length) { box.innerHTML = '<p class="muted small">No obvious small-leak spending — nice.</p>'; return; }
+  const total = rows.reduce((s, r) => s + r.perMo, 0);
+  box.innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>${fmt(total)}/mo total</span><span class="muted small">redirect to debt?</span><span></span></div>` +
+    rows.map((r) => `
+      <div class="recurring-row clickable" data-leak="${r.i}" title="Click to see these buys">
+        <span>${r.label}</span>
+        <span class="freq">~${r.count}×/mo · ${fmt2(r.avg)} avg</span>
+        <span class="bar-val">${fmt(r.perMo)}/mo</span>
+      </div>`).join('');
+  box.querySelectorAll('[data-leak]').forEach((el) => el.addEventListener('click', () => {
+    const [label, re] = groups[+el.dataset.leak];
+    openTxList(label, transactions.filter((t) => t.amount < 0 && re.test(t.description)).sort((a, b) => (a.date < b.date ? 1 : -1)));
+  }));
+}
+
+// Per-category spend: most recent complete month vs the prior average.
+function renderSpendTrends() {
+  const box = $('#spendTrends');
+  if (!box) return;
+  const thisMonth = new Date().toISOString().slice(0, 7);
+  const byCat = {};
+  for (const t of transactions) {
+    if (t.amount >= 0 || !isFlowCat(catOf(t))) continue;
+    const c = catOf(t), m = t.date.slice(0, 7);
+    (byCat[c] = byCat[c] || {})[m] = (byCat[c][m] || 0) + Math.abs(t.amount);
+  }
+  const changes = [];
+  for (const [c, byM] of Object.entries(byCat)) {
+    const ms = Object.keys(byM).filter((m) => m !== thisMonth).sort();
+    if (ms.length < 2) continue;
+    const recent = byM[ms[ms.length - 1]];
+    const prior = ms.slice(0, -1).reduce((s, m) => s + byM[m], 0) / (ms.length - 1);
+    const delta = recent - prior;
+    if (Math.abs(delta) >= 40) changes.push({ c, delta, recent });
+  }
+  changes.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  if (!changes.length) { box.innerHTML = '<p class="muted small">Spending is steady — no big category swings.</p>'; return; }
+  box.innerHTML = changes.slice(0, 8).map((x) => `
+    <div class="recurring-row clickable" data-cat="${escapeHtml(x.c)}" title="Click to see ${escapeHtml(x.c)} spending">
+      <span>${x.delta > 0 ? '<span style="color:var(--danger)">▲</span>' : '<span style="color:var(--accent)">▼</span>'} ${escapeHtml(x.c)}</span>
+      <span class="freq">${x.delta > 0 ? '+' : '−'}${fmt(Math.abs(x.delta))} vs avg</span>
+      <span class="bar-val">${fmt(x.recent)}/mo</span>
+    </div>`).join('');
+  box.querySelectorAll('[data-cat]').forEach((el) => el.addEventListener('click', () => {
+    const c = el.dataset.cat;
+    openTxList(`${c} — spending`, transactions.filter((t) => t.amount < 0 && catOf(t) === c).sort((a, b) => (a.date < b.date ? 1 : -1)));
+  }));
 }
 
 function renderPaymentCalendar() {
@@ -2867,7 +3032,6 @@ function renderAnalytics() {
   renderProgressChart();
   renderBalanceChart(plan, minOnly);
   renderPrincipalChart(plan);
-  renderOwnerChart(plan);
   renderBurnChart();
 }
 
