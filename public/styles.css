@@ -73,6 +73,18 @@ main {
   gap: 16px;
 }
 
+/* Bill calendar grid */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-top: 10px; }
+.cal-head { text-align: center; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; padding: 2px 0; }
+.cal-day { min-height: 78px; background: var(--card-2); border: 1px solid var(--border); border-radius: 7px; padding: 4px 5px; font-size: 0.72rem; overflow: hidden; }
+.cal-day.dim { background: transparent; border-color: transparent; }
+.cal-day.today { border-color: var(--accent); }
+.cal-daynum { font-weight: 700; color: var(--muted); margin-bottom: 2px; }
+.cal-day.today .cal-daynum { color: var(--accent); }
+.cal-payday { color: var(--accent); font-weight: 600; }
+.cal-bill { background: #3a1d22; color: #f2c0c6; border-radius: 4px; padding: 1px 4px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-bill.pay { background: #3d3410; color: var(--warn); }
+
 /* Stack the sidebar on top on narrower screens. */
 @media (max-width: 960px) {
   .app-shell { flex-direction: column; }

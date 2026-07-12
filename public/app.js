@@ -117,6 +117,8 @@ async function init() {
     render();
   });
   $('#useBudgetBtn')?.addEventListener('click', () => { $('#extra').value = monthlySurplus(); render(); });
+  $('#calPrev')?.addEventListener('click', () => { calMonthOffset--; renderBillCalendar(); });
+  $('#calNext')?.addEventListener('click', () => { calMonthOffset++; renderBillCalendar(); });
   $('#addPlannedBtn')?.addEventListener('click', () => {
     const name = (prompt('What is the cost? (e.g. Club soccer, tuition, travel)') || '').trim();
     if (!name) return;
@@ -1347,12 +1349,14 @@ function incomeFromTransactions() {
     const next = new Date(last); next.setDate(next.getDate() + Math.round(medGap));
     const nextDate = next.toISOString().slice(0, 10);
 
+    const perMonth = { WEEKLY: 52 / 12, BIWEEKLY: 26 / 12, SEMI_MONTHLY: 2, MONTHLY: 1 }[frequency] || 1;
     out.push({
       key,
       owner: items[0].owner || 'Me',
       description: items[0].description,
       frequency,
       monthlyAmount: monthly,
+      amount: monthly / perMonth, // per-paycheck amount
       lastDate: last,
       nextDate: nextDate >= new Date().toISOString().slice(0, 10) ? nextDate : null,
       detected: true, // from the live transaction feed, not a Plaid stream
@@ -1972,11 +1976,135 @@ function daysUntil(date) {
   return Math.round((date - today) / 86400000);
 }
 
+// ---- Paycheck & bill calendar ------------------------------------------------
+let calMonthOffset = 0; // 0 = current month, -1 prev, +1 next
+const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const shortName = (n) => (n || '').replace(/®|™/g, '').trim().slice(0, 14);
+function cadenceDays(freq) { return { WEEKLY: 7, BIWEEKLY: 14, SEMI_MONTHLY: 15, MONTHLY: 30, ANNUALLY: 365 }[freq] || 30; }
+
+// Project paycheck dates within [start,end] from detected income sources.
+function projectPaydays(start, end) {
+  const out = [];
+  for (const s of incomeSources()) {
+    const per = Math.abs(s.amount || s.monthlyAmount || 0); // Plaid stores inflows negative
+    if (!per) continue;
+    const cad = cadenceDays(s.frequency);
+    let anchor = s.nextDate ? new Date(s.nextDate + 'T00:00:00') : (s.lastDate ? new Date(s.lastDate + 'T00:00:00') : null);
+    if (!anchor || isNaN(anchor.getTime())) continue;
+    while (anchor > start) anchor = new Date(anchor.getTime() - cad * 86400000);
+    for (let d = new Date(anchor); d <= end; d = new Date(d.getTime() + cad * 86400000)) {
+      if (d >= start) out.push({ date: new Date(d), amount: per, name: s.description });
+    }
+  }
+  return out.sort((a, b) => a.date - b.date);
+}
+
+// Bills occurring in [start,end]: debt payments (by due day-of-month) plus
+// recurring bills (utilities/subscriptions) on their charge day.
+function billOccurrences(start, end) {
+  const out = [];
+  const place = (base, name, amount, extra) => {
+    const dom = base.getDate();
+    let m = new Date(start.getFullYear(), start.getMonth(), 1);
+    const lastM = new Date(end.getFullYear(), end.getMonth(), 1);
+    while (m <= lastM) {
+      const dim = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+      const day = new Date(m.getFullYear(), m.getMonth(), Math.min(dom, dim));
+      if (day >= start && day <= end) out.push({ date: day, name, amount, ...extra });
+      m = new Date(m.getFullYear(), m.getMonth() + 1, 1);
+    }
+  };
+  for (const d of debts) {
+    if (!d.dueDate || !((d.balance || 0) > 0 || (d.minPayment || 0) > 0)) continue;
+    const base = new Date(d.dueDate + 'T00:00:00');
+    if (!isNaN(base.getTime())) place(base, d.name, d.minPayment || 0, { debt: d });
+  }
+  for (const s of recurringStreams) {
+    if (!s.nextDate) continue;
+    // Skip interest/finance charges — they accrue inside a balance, they aren't
+    // a separate bill you pay (and would double-count against the card minimum).
+    if (INTEREST_RE.test(s.description) || FEE_RE.test(s.description)) continue;
+    const base = new Date(s.nextDate + 'T00:00:00');
+    if (!isNaN(base.getTime())) place(base, shortName(s.description) || s.description, s.amount || s.monthlyAmount || 0, { autopay: true });
+  }
+  return out.sort((a, b) => a.date - b.date);
+}
+
+function renderBillCalendar() {
+  const grid = $('#calGrid');
+  if (!grid) return;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const view = new Date(today.getFullYear(), today.getMonth() + calMonthOffset, 1);
+  const label = $('#calMonthLabel');
+  if (label) label.textContent = view.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const monthStart = new Date(view.getFullYear(), view.getMonth(), 1);
+  const monthEnd = new Date(view.getFullYear(), view.getMonth() + 1, 0);
+  const winStart = new Date(monthStart.getTime() - 12 * 86400000);
+  const winEnd = new Date(monthEnd.getTime() + 5 * 86400000);
+  const paydays = projectPaydays(winStart, winEnd);
+  const bills = billOccurrences(winStart, winEnd);
+
+  // Best day to pay each debt = the latest payday at least 1 day before it's due
+  // (so the money's there); autopay bills just hit on their date.
+  const payMarks = {}; // isoDate -> [{name}]
+  for (const b of bills) {
+    if (b.autopay) continue;
+    const before = paydays.filter((p) => p.date < b.date && (b.date - p.date) / 86400000 >= 1);
+    const chosen = before.length ? before[before.length - 1].date : new Date(b.date.getTime() - 3 * 86400000);
+    (payMarks[isoLocal(chosen)] = payMarks[isoLocal(chosen)] || []).push(b);
+  }
+
+  const heads = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((h) => `<div class="cal-head">${h}</div>`).join('');
+  const cells = [];
+  for (let i = 0; i < monthStart.getDay(); i++) cells.push('<div class="cal-day dim"></div>');
+  for (let day = 1; day <= monthEnd.getDate(); day++) {
+    const date = new Date(view.getFullYear(), view.getMonth(), day);
+    const key = isoLocal(date);
+    let html = `<div class="cal-day ${date.getTime() === today.getTime() ? 'today' : ''}"><div class="cal-daynum">${day}</div>`;
+    for (const p of paydays.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-payday">💵 ${fmt(p.amount)}</div>`;
+    for (const p of (payMarks[key] || [])) html += `<div class="cal-bill pay" title="Best day to pay ${escapeHtml(p.name)}">⭐ pay ${escapeHtml(shortName(p.name))}</div>`;
+    for (const b of bills.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-bill" title="${escapeHtml(b.name)} ${b.autopay ? 'charges' : 'due'}">${escapeHtml(shortName(b.name))} ${b.amount ? fmt(b.amount) : ''}</div>`;
+    cells.push(html + '</div>');
+  }
+  grid.innerHTML = heads + cells.join('');
+
+  renderPaycheckPlan(paydays, bills, today);
+}
+
+// Per-paycheck plan: each upcoming check, the bills due before the next one,
+// and what's left to throw at debt. Built for paycheck-to-paycheck budgeting.
+function renderPaycheckPlan(paydays, bills, today) {
+  const box = $('#paycheckPlan');
+  if (!box) return;
+  const upcoming = paydays.filter((p) => p.date >= today).slice(0, 4);
+  if (!upcoming.length) { box.innerHTML = '<p class="muted small">Connect income (or import transactions) and I\'ll map bills to each paycheck.</p>'; return; }
+  box.innerHTML = upcoming.map((p, i) => {
+    const periodEnd = upcoming[i + 1] ? upcoming[i + 1].date : new Date(p.date.getTime() + cadenceDays('BIWEEKLY') * 86400000);
+    const due = bills.filter((b) => b.date >= p.date && b.date < periodEnd);
+    const dueTotal = due.reduce((s, b) => s + b.amount, 0);
+    const left = p.amount - dueTotal;
+    const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `<div class="chart-box" style="margin-bottom:10px">
+      <div class="row spread">
+        <strong>💵 ${fmtD(p.date)} paycheck — ${fmt(p.amount)}</strong>
+        <span class="muted small">bills through ${fmtD(periodEnd)}</span>
+      </div>
+      ${due.length ? due.map((b) => `<div class="recurring-row"><span>${b.autopay ? '🔁 ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · autopay' : ''}</span><span class="bar-val">${fmt(b.amount)}</span></div>`).join('') : '<p class="muted small">No bills due before your next check.</p>'}
+      <div class="recurring-row" style="font-weight:700;border-top:1px solid var(--border)">
+        <span>Left for debt &amp; savings</span><span></span>
+        <span class="bar-val" style="color:${left >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(left)}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function renderPaymentCalendar() {
   const card = $('#calendarCard');
   const owed = debts.filter((d) => (d.balance || 0) > 0);
   if (!owed.length) { card.hidden = true; return; }
   card.hidden = false;
+  renderBillCalendar();
 
   const scheduled = owed
     .map((d) => ({ debt: d, due: nextDueDate(d) }))

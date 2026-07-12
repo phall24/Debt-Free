@@ -131,12 +131,23 @@
       </div>
     </section>
 
-    <!-- Upcoming payments / due dates -->
+    <!-- Paycheck & bill calendar -->
     <section class="card" id="calendarCard" hidden>
-      <h2>📅 Upcoming payments</h2>
-      <p class="muted small">Never miss a minimum — a late payment means a fee, a rate hike, and a credit hit. Ordered by what's due next.</p>
+      <div class="row spread">
+        <h2>📅 Paycheck &amp; bill calendar</h2>
+        <div class="actions">
+          <button id="calPrev" class="ghost" title="Previous month">‹</button>
+          <span id="calMonthLabel" style="font-weight:600;min-width:120px;text-align:center;display:inline-block"></span>
+          <button id="calNext" class="ghost" title="Next month">›</button>
+        </div>
+      </div>
+      <p class="muted small">💵 = payday · bills sit on their due date · ⭐ = best day to pay (right after the paycheck that covers it). Below the grid: what each paycheck covers.</p>
       <div id="dueAlerts"></div>
-      <div id="calendarList" class="debt-list"></div>
+      <div id="calGrid" class="cal-grid"></div>
+      <h3 style="margin:18px 0 6px">Per-paycheck plan</h3>
+      <p class="muted small">Each check, the bills due before your next one, and what's left to throw at debt.</p>
+      <div id="paycheckPlan"></div>
+      <details style="margin-top:12px"><summary>All upcoming due dates</summary><div id="calendarList" class="debt-list"></div></details>
     </section>
 
     <!-- Plan controls -->
