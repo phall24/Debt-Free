@@ -1622,16 +1622,24 @@ function renderSidebar() {
     const strategy = $('#strategy')?.value || 'avalanche';
     const extra = parseFloat($('#extra')?.value) || 0;
     const plan = attack.length ? simulate(attack, strategy, extra) : null;
+    const minOnly = attack.length ? simulate(attack, strategy, 0) : null;
     const free = monthlySurplus();
+    const netWorth = assets - attackBal - autoBal;
     const efMonths = monthlyExpenses() ? assets / monthlyExpenses() : null;
-    const row = (k, v, color) => `<div class="side-stat"><span class="k">${k}</span><span class="v" ${color ? `style="color:${color}"` : ''}>${v}</span></div>`;
+    const { monthly: bleed } = feeBreakdown();
+    const interestSaved = plan && minOnly && !plan.stalled ? Math.max(0, minOnly.totalInterest - plan.totalInterest) : 0;
+    const row = (k, v, color, hint) => `<div class="side-stat"${hint ? ` title="${hint}"` : ''}><span class="k">${k}</span><span class="v" ${color ? `style="color:${color}"` : ''}>${v}</span></div>`;
+    // One scoreboard, sensibly ordered: what you owe → the goal → progress levers.
     statsEl.innerHTML =
       row('Total debt', fmt(attackBal + autoBal), 'var(--danger)') +
-      row('To attack', fmt(attackBal)) +
-      (plan && !plan.stalled ? row('Cards free', monthsToDate(plan.months), 'var(--accent)') : '') +
-      row('Net worth', fmt(assets - attackBal - autoBal), assets - attackBal - autoBal >= 0 ? 'var(--accent)' : 'var(--danger)') +
-      (efMonths != null ? row('Emergency fund', `${efMonths.toFixed(1)} mo`, efMonths >= 1 ? 'var(--accent)' : 'var(--warn)') : '') +
-      row('Free to accelerate', `${fmt(free)}/mo`, 'var(--accent)');
+      row('Cards to attack', fmt(attackBal)) +
+      (autoBal ? row('Auto loans (min only)', fmt(autoBal), 'var(--muted)', 'Held at minimums — not part of the attack') : '') +
+      (plan && !plan.stalled ? row('Cards debt-free', monthsToDate(plan.months), 'var(--accent)') : '') +
+      (interestSaved ? row('Interest you\'ll save', fmt(interestSaved), 'var(--accent)') : '') +
+      row('Net worth', fmt(netWorth), netWorth >= 0 ? 'var(--accent)' : 'var(--danger)') +
+      (efMonths != null ? row('Emergency fund', `${efMonths.toFixed(1)} mo`, efMonths >= 1 ? 'var(--accent)' : 'var(--warn)', 'Months of expenses your savings covers') : '') +
+      (bleed ? row('Bleeding to fees', `${fmt(bleed)}/mo`, 'var(--danger)') : '') +
+      row('Free to accelerate', `${fmt(free)}/mo`, 'var(--accent)', 'Income minus living costs and all minimums');
 
     // Next payment due — the single most urgent item.
     const owed = debts.filter((d) => (d.balance || 0) > 0).map((d) => ({ d, due: nextDueDate(d) }))
@@ -1695,30 +1703,10 @@ function renderDashboard() {
   const strategy = $('#strategy')?.value || 'avalanche';
   const extra = parseFloat($('#extra')?.value) || 0;
   const plan = simulate(attack, strategy, extra);
-  const minOnly = simulate(attack, strategy, 0);
-
-  const attackBalance = attack.reduce((s, d) => s + d.balance, 0);
-  const autoBalance = autoLoans().reduce((s, d) => s + d.balance, 0);
-  const assets = accounts.reduce((s, a) => s + (a.balance || 0), 0);
-  const netWorth = assets - attackBalance - autoBalance;
   const income = verifiedMonthlyIncome();
-  const { monthly: bleed } = feeBreakdown();
-  const monthlyExp = monthlyExpenses();
-  const efMonths = monthlyExp ? assets / monthlyExp : null; // emergency-fund coverage
 
-  // ---- Hero KPIs -------------------------------------------------------------
-  const freeDate = plan.stalled ? 'stalled — raise payment' : plan.months <= 0 ? 'done!' : monthsToDate(plan.months);
-  const interestSaved = Math.max(0, minOnly.totalInterest - plan.totalInterest);
-  $('#dashKpis').innerHTML = `
-    <div class="stat"><div class="key">Debt to attack</div><div class="value" style="color:var(--danger)">${fmt(attackBalance)}</div></div>
-    <div class="stat"><div class="key">Cards debt-free</div><div class="value good">${freeDate}</div></div>
-    <div class="stat"><div class="key">Interest you'll save</div><div class="value good">${fmt(interestSaved)}</div></div>
-    <div class="stat"><div class="key">Net worth</div><div class="value ${netWorth >= 0 ? 'good' : ''}" style="${netWorth < 0 ? 'color:var(--danger)' : ''}">${fmt(netWorth)}</div></div>
-    ${efMonths != null ? `<div class="stat" title="Liquid savings ÷ average monthly spending. Aim for ~1 month before max-attacking debt, then build to 3–6."><div class="key">Emergency fund</div><div class="value" style="color:${efMonths >= 1 ? 'var(--accent)' : 'var(--warn)'}">${efMonths.toFixed(1)} mo</div></div>` : ''}
-    <div class="stat"><div class="key">Bleeding to interest/fees</div><div class="value" style="color:var(--danger)">${fmt(bleed)}/mo</div></div>
-    ${autoBalance ? `<div class="stat"><div class="key">Auto loans (minimums)</div><div class="value muted">${fmt(autoBalance)}</div></div>` : ''}
-  `;
-
+  // KPIs live in the sticky sidebar scoreboard (see renderSidebar) — the
+  // dashboard card focuses on the actionable widgets below.
   renderDashAlerts(attack);
   renderDashChecklist();
   renderDashUtil(attack);

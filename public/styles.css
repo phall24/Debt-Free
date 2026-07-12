@@ -33,16 +33,16 @@ html { scroll-behavior: smooth; }
 
 /* Two-column app shell: sticky sidebar + main content. */
 .app-shell {
-  max-width: 1500px;
+  max-width: 2100px;
   margin: 0 auto;
-  padding: 20px clamp(16px, 3vw, 40px);
+  padding: 20px clamp(16px, 2.5vw, 48px);
   display: flex;
   align-items: flex-start;
-  gap: 24px;
+  gap: 28px;
 }
 
 #sidebar {
-  width: 290px;
+  width: 320px;
   flex-shrink: 0;
   position: sticky;
   top: 20px;
