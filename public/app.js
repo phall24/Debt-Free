@@ -69,12 +69,13 @@ async function init() {
   render();
 
   // Recurring streams + verified income are slower to compute on Plaid's side;
-  // fetch them after the first paint so the page isn't blocked, then re-render.
-  if (plaidConfigured) pullRecurring().then(render);
+  // fetch them after the first paint so the page isn't blocked, then auto-add
+  // any detected untracked debts and re-render.
+  if (plaidConfigured) pullRecurring().then(() => { syncAutoDetectedDebts(); render(); });
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
-  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) await pullRecurring(); render(); });
+  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) { await pullRecurring(); syncAutoDetectedDebts(); } render(); });
   $('#addManualBtn').addEventListener('click', () => openDialog());
   $('#restoreHiddenBtn').addEventListener('click', restoreHidden);
   $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
@@ -443,6 +444,7 @@ function onDialogSubmit(e) {
     type: dialogOrigin === 'statement' ? 'from statement' : 'manual',
     source: 'manual',
     origin: dialogOrigin || 'manual',
+    needsTerms: false, // user has now reviewed/entered the terms
   };
   if (editingId) {
     const d = debts.find((x) => x.id === editingId);
@@ -468,6 +470,11 @@ function deleteDebt(id) {
   if (d.source === 'plaid') {
     if (!confirm(`Hide "${d.name}" from your plan? It will stay hidden even after refreshing. (Reconnecting the bank won't bring it back unless you un-hide it.)`)) return;
     if (d.account_id) { excludedKeys.add(d.account_id); saveExcluded(); }
+  }
+  // Auto-detected debt: remember the removal so we don't re-add it next refresh.
+  if (d.autoDetected && d.autoKey) {
+    dismissedDebtHints.push(d.autoKey);
+    localStorage.setItem('dismissedDebtHints', JSON.stringify(dismissedDebtHints));
   }
   debts = debts.filter((x) => x.id !== id);
   if (d.source === 'manual') saveManualDebts();
@@ -1571,38 +1578,59 @@ const DEBT_NAME_STOPWORDS = new Set(['card', 'cards', 'visa', 'loan', 'loans', '
   'line', 'used', 'vehicle', 'checking', 'savings', 'mastercard', 'express', 'american',
   'preferred', 'signature', 'account', 'member', 'aadvantage']);
 
+// Tidy a raw ACH/recurring description into a debt name.
+function cleanDebtName(desc) {
+  return desc
+    .replace(/ACH Transaction\s*-\s*/i, '')
+    .replace(/\bACH (DEBIT|CREDIT|PMT|PAYMENT)\b/ig, '')
+    .replace(/\b(NFMCARDPMT|CRCARDPMT|CARDPMT|EPAYMENT|WEB PMT|BILL ?PAY)\b/ig, '')
+    .replace(/\b\d[\d-]{3,}\b/g, '')
+    .replace(/\s+/g, ' ').trim() || desc;
+}
+
+// Auto-add debts we detect you're PAYING (from the recurring feed) but that
+// aren't in your debt list — so the plan sees them without you lifting a finger.
+// We fill the monthly payment; you set balance/APR or remove any that aren't
+// debts (removal is remembered so it won't come back).
+function syncAutoDetectedDebts() {
+  let added = 0;
+  for (const s of allRecurringOut.filter(looksLikeUntrackedDebt)) {
+    const key = normalizeMerchant(s.description);
+    if (debts.some((d) => d.autoKey === key)) continue; // already auto-added
+    debts.push({
+      id: cryptoId(),
+      name: cleanDebtName(s.description),
+      owner: 'Me',
+      type: 'auto-detected',
+      balance: 0,
+      apr: 0,
+      minPayment: Math.round(s.monthlyAmount),
+      creditLimit: null,
+      dueDate: null,
+      source: 'manual',
+      origin: 'auto',
+      autoDetected: true,
+      autoKey: key,
+      needsTerms: true,
+    });
+    added++;
+  }
+  if (added) saveManualDebts();
+  return added;
+}
+
+// Heads-up banner for auto-added debts that still need a balance/APR.
 function renderUntrackedDebts() {
   const box = $('#untrackedDebts');
   if (!box) return;
-  const hints = allRecurringOut.filter(looksLikeUntrackedDebt).sort((a, b) => b.monthlyAmount - a.monthlyAmount);
-  if (!hints.length) { box.innerHTML = ''; return; }
-  const total = hints.reduce((s, h) => s + h.monthlyAmount, 0);
+  const pending = debts.filter((d) => d.autoDetected && (!d.balance || d.needsTerms));
+  if (!pending.length) { box.innerHTML = ''; return; }
   box.innerHTML = `
     <div class="banner warn" style="border-color:var(--warn)">
-      <strong>💡 ${hints.length} possible untracked debt${hints.length > 1 ? 's' : ''} (~${fmt(total)}/mo in payments)</strong> —
-      you're paying these every month but they're not in your debt list, so your plan and surplus are understated. Add each so the payoff engine can see it.
-      <div style="margin-top:8px">
-        ${hints.map((h, i) => `
-          <div class="recurring-row">
-            <span>${escapeHtml(h.description)}</span>
-            <span class="freq">${fmt2(h.monthlyAmount)}/mo</span>
-            <span style="display:flex;gap:6px">
-              <button class="primary" data-addhint="${i}">＋ Add as debt</button>
-              <button class="ghost" data-skiphint="${i}">Not a debt</button>
-            </span>
-          </div>`).join('')}
-      </div>
+      <strong>🔍 Auto-added ${pending.length} debt${pending.length > 1 ? 's' : ''} we saw you paying</strong>
+      (${pending.map((d) => escapeHtml(d.name)).join(', ')}). I filled in the monthly payment —
+      click a debt → <strong>Edit</strong> to set its balance &amp; APR so it joins your payoff plan, or hit ✕ to remove any that isn't a debt (it won't come back).
     </div>`;
-  box.querySelectorAll('[data-addhint]').forEach((b) => b.addEventListener('click', () => {
-    const h = hints[+b.dataset.addhint];
-    openDialog({ name: h.description.replace(/\s+/g, ' ').trim(), minPayment: Math.round(h.monthlyAmount), origin: 'manual' },
-      'This looks like a debt you pay monthly. Add its balance and APR so it joins your payoff plan.');
-  }));
-  box.querySelectorAll('[data-skiphint]').forEach((b) => b.addEventListener('click', () => {
-    dismissedDebtHints.push(normalizeMerchant(hints[+b.dataset.skiphint].description));
-    localStorage.setItem('dismissedDebtHints', JSON.stringify(dismissedDebtHints));
-    renderUntrackedDebts();
-  }));
 }
 
 // ---- Sidebar (persistent at-a-glance rail) -----------------------------------
@@ -1800,8 +1828,7 @@ function renderDashIncome(income, plan, extra) {
   // inferred auto-loan payments) = the cash genuinely free to accelerate payoff.
   const living = monthlyExpenses();
   const autoMin = autoLoans().reduce((s, d) => s + (d.minPayment || 0), 0);
-  const cardMin = attackableDebts().reduce((s, d) => s + (d.minPayment || 0), 0);
-  const allMin = autoMin + cardMin;
+  const allMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0); // ALL minimums, incl. auto-detected
   const free = monthlySurplus(); // income − living − all minimums (floored)
   const aura = incomeSources().find((s) => /aura/i.test(s.description));
   const auraDown = aura && incomeTrendForKey(aura.key).dir === 'down';
@@ -1946,8 +1973,8 @@ function renderDebts() {
       <div>
         <div class="name">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
         <div class="meta">
-          <span class="pill">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
-          ${d.type ? escapeHtml(d.type) : ''}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ click Edit to set APR${d.minPayment ? '' : ' &amp; payment'}</span>` : ''}
+          <span class="pill">${d.autoDetected ? '🔍 auto-detected' : d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
+          ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}</span>` : ''}
         </div>
         ${factLine}
       </div>
