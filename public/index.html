@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 </head>
 <body>
   <header>
@@ -163,6 +164,7 @@
           <button id="calPrev" class="ghost" title="Previous month">‹</button>
           <span id="calMonthLabel" style="font-weight:600;min-width:120px;text-align:center;display:inline-block"></span>
           <button id="calNext" class="ghost" title="Next month">›</button>
+          <button id="downloadMonthBtn" class="ghost" title="Download this month's calendar + line-by-line budget">⬇ Download month</button>
         </div>
       </div>
       <p class="muted small">💵 = payday · bills sit on their due date · ⭐ = best day to pay (right after the paycheck that covers it). Below the grid: what each paycheck covers.</p>
