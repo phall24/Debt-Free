@@ -3209,8 +3209,12 @@ function renderGamePlan() {
   const debtMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
   const byCat = monthlyByCategory();
   const fixedBills = ['Housing', 'Utilities', 'Insurance', 'Subscriptions'].reduce((s, c) => s + (byCat[c] || 0), 0);
-  const bufferPush = built ? 0 : Math.min(2000, Math.max(0, bufferTarget - checking));
-  const allowance = Math.max(0, income - debtMin - plannedTotal() - fixedBills - bufferPush);
+  // A CONSTANT monthly set-aside — it goes to the buffer while you're building
+  // it, then flips to the cards once it's full. Your spending budget doesn't
+  // change when the buffer fills; only where the money goes changes.
+  const reserve = Math.min(2000, Math.max(0, monthlySurplus()));
+  const reserveDest = built ? 'your cards' : 'your buffer';
+  const allowance = Math.max(0, income - debtMin - plannedTotal() - fixedBills - reserve);
   const perWeek = Math.floor(allowance / 4.3 / 10) * 10;
   const ym = new Date().toISOString().slice(0, 7);
   const flexCats = new Set(['Groceries', 'Gas', 'Dining', 'Shopping', 'Travel', 'Transport', 'Health', 'Cash', 'Other']);
@@ -3222,7 +3226,7 @@ function renderGamePlan() {
   const status = spent > allowance ? '🚨 Over budget — ease off dining/shopping.' : spent > expected * 1.05 ? '⚠️ Spending a bit fast for this point in the month.' : '✅ On track.';
   $('#safeToSpend').innerHTML = `<div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
     <div class="rec-title">💰 This month you can spend ${fmt(allowance)} on everyday stuff — about ${fmt(perWeek)}/week</div>
-    <div class="rec-detail muted small">After debt payments (${fmt(debtMin)}), fixed bills (${fmt(fixedBills)}), soccer + kid cushion (${fmt(plannedTotal())})${bufferPush ? `, and ${fmt(bufferPush)} toward your buffer` : ''}. Covers groceries, gas, dining, shopping — the stuff you control.</div>
+    <div class="rec-detail muted small">After debt payments (${fmt(debtMin)}), fixed bills (${fmt(fixedBills)}), soccer + kid cushion (${fmt(plannedTotal())}), and <strong>${fmt(reserve)}/mo to ${reserveDest}</strong>${built ? '' : ` (that same ${fmt(reserve)} flips to your cards once the buffer hits ${fmt(bufferTarget)} — your spending budget stays the same)`}. Covers groceries, gas, dining, shopping — the stuff you control.</div>
     <div class="bar-row" style="grid-template-columns:1fr 150px;margin-top:8px"><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, Math.round(spent / (allowance || 1) * 100))}%;background:${barCol}"></div></div><span class="bar-val" style="color:${barCol}">${fmt(spent)} spent</span></div>
     <div class="muted small" style="margin-top:2px">${status} <strong>${fmt(Math.max(0, allowance - spent))}</strong> left for the rest of ${now.toLocaleDateString('en-US', { month: 'long' })}.</div>
   </div></div>`;
