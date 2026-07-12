@@ -122,6 +122,27 @@ async function init() {
   $('#useBudgetBtn')?.addEventListener('click', () => { $('#extra').value = monthlySurplus(); render(); });
   $('#downloadPlanBtn')?.addEventListener('click', downloadPlan);
   $('#downloadMonthBtn')?.addEventListener('click', downloadMonthlyPackage);
+  $('#addApptBtn')?.addEventListener('click', () => {
+    const f = $('#apptForm');
+    f.hidden = !f.hidden;
+    if (!f.hidden) {
+      if (!$('#apptDate').value) $('#apptDate').value = new Date().toISOString().slice(0, 10);
+      $('#apptTitle').focus();
+    }
+  });
+  $('#apptCancel')?.addEventListener('click', () => { $('#apptForm').hidden = true; });
+  $('#apptSave')?.addEventListener('click', () => {
+    const date = $('#apptDate').value;
+    const title = ($('#apptTitle').value || '').trim();
+    const cost = parseFloat($('#apptCost').value) || 0;
+    if (!date || !title) { showToast('Add a date and a title for the appointment.'); return; }
+    calendarEvents.push({ id: cryptoId(), date, title, cost: cost > 0 ? cost : null });
+    saveCalendarEvents();
+    $('#apptTitle').value = ''; $('#apptCost').value = '';
+    $('#apptForm').hidden = true;
+    render();
+    showToast(`Added “${title}”${cost > 0 ? ` (${fmt(cost)})` : ''}.`);
+  });
   $('#calPrev')?.addEventListener('click', () => { calMonthOffset--; renderBillCalendar(); });
   $('#calNext')?.addEventListener('click', () => { calMonthOffset++; renderBillCalendar(); });
   $('#addPlannedBtn')?.addEventListener('click', () => {
@@ -985,6 +1006,11 @@ const plannedTotal = () => plannedExpenses.reduce((s, p) => s + (+p.amount || 0)
 // semi-monthly/monthly, or { anchorDate:'YYYY-MM-DD' } for weekly/biweekly.
 let payOverrides = loadJSON('payOverrides', {});
 function savePayOverrides() { localStorage.setItem('payOverrides', JSON.stringify(payOverrides)); }
+
+// User-added calendar appointments/events: { id, date:'YYYY-MM-DD', title, cost }.
+// Costs (if given) flow into the month's spending and the cash-flow forecast.
+let calendarEvents = loadJSON('calendarEvents', []);
+function saveCalendarEvents() { localStorage.setItem('calendarEvents', JSON.stringify(calendarEvents)); }
 
 // One-paycheck checking buffer target (advisor: build this before max-attacking
 // the 28% cards, so a tight pay period never causes an overdraft).
@@ -2238,9 +2264,11 @@ function renderBillCalendar() {
     for (const p of paydays.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-payday">💵 ${fmt(p.amount)}</div>`;
     for (const p of (payMarks[key] || [])) html += `<div class="cal-bill pay" title="Best day to pay ${escapeHtml(p.name)}">⭐ pay ${escapeHtml(shortName(p.name))}</div>`;
     for (const b of bills.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-bill" title="${escapeHtml(b.name)} ${b.autopay ? 'charges' : 'due'}">${escapeHtml(shortName(b.name))} ${b.amount ? fmt(b.amount) : ''}</div>`;
+    for (const ev of calendarEvents.filter((e) => e.date === key)) html += `<div class="cal-appt" data-appt="${ev.id}" title="Click to remove: ${escapeHtml(ev.title)}">📌 ${escapeHtml(shortName(ev.title))}${ev.cost ? ' ' + fmt(ev.cost) : ''}</div>`;
     cells.push(html + '</div>');
   }
   grid.innerHTML = heads + cells.join('');
+  grid.querySelectorAll('[data-appt]').forEach((el) => el.addEventListener('click', () => removeAppointment(el.dataset.appt)));
 
   renderPaySchedule();
   renderPaycheckPlan(paydays, bills, today);
@@ -2304,6 +2332,7 @@ function computeCashflow() {
     bal -= dailyBurn;
     for (const p of paydays.filter((x) => isoLocal(x.date) === key)) bal += p.amount;
     for (const b of debtBills.filter((x) => isoLocal(x.date) === key)) bal -= b.amount;
+    for (const ev of calendarEvents.filter((e) => e.date === key && e.cost)) bal -= (+ev.cost || 0);
     series.push({ date: new Date(d), bal });
     if (bal < minBal) { minBal = bal; minDate = new Date(d); }
   }
@@ -2470,6 +2499,15 @@ function renderSpendTrends() {
     const c = el.dataset.cat;
     openTxList(`${c} — spending`, transactions.filter((t) => t.amount < 0 && catOf(t) === c).sort((a, b) => (a.date < b.date ? 1 : -1)));
   }));
+}
+
+function removeAppointment(id) {
+  const ev = calendarEvents.find((e) => e.id === id);
+  if (!ev) return;
+  calendarEvents = calendarEvents.filter((e) => e.id !== id);
+  saveCalendarEvents();
+  render();
+  showToast(`Removed “${ev.title}”`, 'Undo', () => { calendarEvents.push(ev); saveCalendarEvents(); render(); });
 }
 
 function renderPaymentCalendar() {
@@ -3211,7 +3249,8 @@ function downloadMonthlyPackage() {
     const key = isoLocal(date);
     const pd = paydays.filter((p) => isoLocal(p.date) === key).map((p) => `<div class="in">+${money(p.amount)}</div>`).join('');
     const db = bills.filter((b) => isoLocal(b.date) === key).map((b) => `<div class="out">${escapeHtml(shortName(b.name))} ${money(b.amount)}</div>`).join('');
-    cells.push(`<td><b>${day}</b>${pd}${db}</td>`);
+    const ap = calendarEvents.filter((e) => e.date === key).map((e) => `<div>📌 ${escapeHtml(shortName(e.title))}${e.cost ? ' ' + money(e.cost) : ''}</div>`).join('');
+    cells.push(`<td><b>${day}</b>${pd}${db}${ap}</td>`);
   }
   let grid = '';
   for (let i = 0; i < cells.length; i += 7) grid += '<tr>' + cells.slice(i, i + 7).join('') + '</tr>';
@@ -3222,6 +3261,10 @@ function downloadMonthlyPackage() {
   const totalIn = paydays.reduce((s, p) => s + p.amount, 0);
   const billRows = bills.map((b) => `<tr><td>${b.date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td><td>${escapeHtml(b.name)}${b.autopay ? ' <em>(autopay)</em>' : ''}</td><td class="r out">${money(b.amount)}</td></tr>`).join('');
   const totalBills = bills.reduce((s, b) => s + b.amount, 0);
+
+  const monthAppts = calendarEvents.filter((e) => e.date.slice(0, 7) === ym).sort((a, b) => (a.date < b.date ? -1 : 1));
+  const apptSection = monthAppts.length ? `<h2>📌 Appointments &amp; events</h2>
+<table><tr><th>Date</th><th>What</th><th class="r">Cost</th></tr>${monthAppts.map((e) => `<tr><td>${e.date}</td><td>${escapeHtml(e.title)}</td><td class="r out">${e.cost ? money(e.cost) : '—'}</td></tr>`).join('')}</table>` : '';
 
   // Spending by category (actuals this month).
   const byCat = {};
@@ -3247,6 +3290,8 @@ ${cal}
 
 <h2>🧾 Scheduled bills &amp; payments</h2>
 <table><tr><th>Date</th><th>Bill</th><th class="r">Amount</th></tr>${billRows}<tr class="tot"><td colspan="2">Total scheduled</td><td class="r out">${money(totalBills)}</td></tr></table>
+
+${apptSection}
 
 <h2>📊 Spending by category (actual)</h2>
 <table><tr><th>Category</th><th class="r">Spent</th></tr>${catRows}<tr class="tot"><td>Total spent</td><td class="r out">${money(totalSpent)}</td></tr></table>

@@ -85,6 +85,8 @@ main {
 .cal-payday { color: var(--accent); font-weight: 600; }
 .cal-bill { background: #3a1d22; color: #f2c0c6; border-radius: 4px; padding: 1px 4px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-bill.pay { background: #3d3410; color: var(--warn); }
+.cal-appt { background: #16324a; color: #9ecbf0; border-radius: 4px; padding: 2px 4px; margin-top: 3px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cal-appt:hover { filter: brightness(1.25); }
 
 /* Cash-flow forecast day strip */
 .cashflow-strip { display: flex; gap: 1px; margin-top: 10px; height: 26px; border-radius: 5px; overflow: hidden; }

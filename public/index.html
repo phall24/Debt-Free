@@ -165,10 +165,18 @@
           <button id="calPrev" class="ghost" title="Previous month">‹</button>
           <span id="calMonthLabel" style="font-weight:600;min-width:120px;text-align:center;display:inline-block"></span>
           <button id="calNext" class="ghost" title="Next month">›</button>
-          <button id="downloadMonthBtn" class="ghost" title="Download this month's calendar + line-by-line budget">⬇ Download month</button>
+          <button id="addApptBtn" class="ghost" title="Add an appointment or event">＋ Appointment</button>
+          <button id="downloadMonthBtn" class="ghost" title="Download this month's calendar + budget">⬇ Download month</button>
         </div>
       </div>
-      <p class="muted small">💵 = payday · bills sit on their due date · ⭐ = best day to pay (right after the paycheck that covers it). Below the grid: what each paycheck covers.</p>
+      <p class="muted small">💵 = payday · bills on due dates · ⭐ = best day to pay · 📌 = your appointments. Below the grid: what each paycheck covers.</p>
+      <div id="apptForm" class="row" hidden style="gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0">
+        <input type="date" id="apptDate" />
+        <input type="text" id="apptTitle" placeholder="Appointment / event (e.g. Dentist, tournament)" style="flex:1;min-width:200px" />
+        <div class="input-prefix"><span>$</span><input type="number" id="apptCost" placeholder="cost (optional)" style="width:120px" /></div>
+        <button id="apptSave" class="primary">Add</button>
+        <button id="apptCancel" class="ghost">Cancel</button>
+      </div>
       <details style="margin:6px 0"><summary class="muted small">💵 Pay schedule — correct any dates the bank posts oddly</summary><div id="payScheduleList" style="margin-top:6px"></div></details>
       <div id="dueAlerts"></div>
       <div id="calGrid" class="cal-grid"></div>
