@@ -3256,10 +3256,22 @@ function renderGamePlan() {
     <div class="muted small" style="margin-top:2px">${status} <strong>${fmt(Math.max(0, allowance - spent))}</strong> left for the rest of ${now.toLocaleDateString('en-US', { month: 'long' })}.</div>
   </div></div>`;
 
-  // The dead-simple, even version — the one thing to remember.
+  // ---- The leveler: turn lumpy checks into ONE standard number ----
+  const monthlyObligations = debtMin + fixedBills + plannedTotal() + reserve;
+  const keepPct = income > 0 ? Math.round((monthlyObligations / income) * 100) : 0;
+  const paydayCount = (() => {
+    let n = 0; for (const s of sources) n += (s.frequency === 'SEMI_MONTHLY' ? 2 : s.frequency === 'BIWEEKLY' ? 2.17 : s.frequency === 'WEEKLY' ? 4.33 : 1); return Math.round(n) || 1;
+  })();
+  const perCheckLive = Math.round(allowance / paydayCount / 10) * 10;
   $('#gamePlanSimple').innerHTML = `<div class="rec info" style="grid-template-columns:1fr;background:#14271a;border-color:#1f4427"><div class="rec-main">
-    <div class="rec-title">🎯 The simple version — the one thing to remember</div>
-    <div class="rec-detail muted small">Live on about <strong>${fmt(perWeek)}/week</strong>. Every payday, move whatever's left ${built ? 'straight to your cards' : `to savings until your buffer hits <strong>${fmt(bufferTarget)}</strong>, then to your cards`}. Same move every check — saving runs on autopilot and the lumpy months even out.</div>
+    <div class="rec-title">🎚️ Your standard number — run off this, not the lumpy checks</div>
+    <div class="rec-detail muted small">
+      Your paychecks vary, so don't budget each one. Instead, use one steady formula every time:
+      <div style="margin:6px 0 0 0;font-size:0.95rem;color:var(--text)">
+        <strong>Keep ${keepPct}% of every check</strong> for bills + ${built ? 'cards' : 'buffer'}, <strong>live on the rest — about ${fmt(perWeek)}/week</strong> (≈ ${fmt(perCheckLive)} per paycheck).
+      </div>
+      <div style="margin-top:6px">Big checks over-fund, small checks under-fund — the buffer absorbs the difference so your spending stays level. ${built ? 'Buffer built, so the "keep" money attacks your cards.' : `Once the buffer hits ${fmt(bufferTarget)}, the "keep" money flips to your cards — your ${fmt(perWeek)}/week doesn't change.`}</div>
+    </div>
   </div></div>`;
 
   // Which day the auto payments hit, and how much.
