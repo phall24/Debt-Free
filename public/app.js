@@ -63,6 +63,15 @@ async function init() {
     $('#plaidStatus').textContent = 'Backend not reachable.';
   }
 
+  // Seed the known upcoming competitive-soccer cost once (~$500/mo). If the user
+  // deletes it, the flag keeps it from coming back. (After the awaits above so
+  // module-level `let` state is initialized.)
+  if (!localStorage.getItem('seededPlanned')) {
+    plannedExpenses.push({ id: cryptoId(), name: 'Competitive soccer (son)', amount: 500 });
+    savePlanned();
+    localStorage.setItem('seededPlanned', '1');
+  }
+
   // If Plaid is configured, try to pull any already-linked debts.
   if (plaidConfigured) await pullPlaidDebts();
 
@@ -71,7 +80,12 @@ async function init() {
   // Recurring streams + verified income are slower to compute on Plaid's side;
   // fetch them after the first paint so the page isn't blocked, then auto-add
   // any detected untracked debts and re-render.
-  if (plaidConfigured) pullRecurring().then(() => { syncAutoDetectedDebts(); render(); });
+  if (plaidConfigured) pullRecurring().then(() => {
+    syncAutoDetectedDebts();
+    // Default Smart plan funds itself from the (now-computable) free cash.
+    if ($('#strategy').value === 'custom') $('#extra').value = monthlySurplus();
+    render();
+  });
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
@@ -97,7 +111,29 @@ async function init() {
     if (d) openDialog(d);
   });
   $('#unlinkBtn').addEventListener('click', unlinkAll);
-  $('#strategy').addEventListener('change', render);
+  $('#strategy').addEventListener('change', () => {
+    // Smart plan funds itself from your budget — auto-set the extra to free cash.
+    if ($('#strategy').value === 'custom') $('#extra').value = monthlySurplus();
+    render();
+  });
+  $('#useBudgetBtn')?.addEventListener('click', () => { $('#extra').value = monthlySurplus(); render(); });
+  $('#addPlannedBtn')?.addEventListener('click', () => {
+    const name = (prompt('What is the cost? (e.g. Club soccer, tuition, travel)') || '').trim();
+    if (!name) return;
+    const amount = parseFloat(prompt(`About how much per month for "${name}"?`, '100'));
+    if (!amount || amount <= 0) return;
+    plannedExpenses.push({ id: cryptoId(), name, amount });
+    savePlanned();
+    render();
+  });
+  $('#autoBudgetBtn')?.addEventListener('click', () => {
+    const byCat = monthlyByCategory();
+    const targets = {};
+    for (const [c, v] of Object.entries(byCat)) if (v >= 10 && c !== 'Income') targets[c] = Math.round(v / 10) * 10;
+    budgetTargets = targets;
+    localStorage.setItem('budgetTargets', JSON.stringify(budgetTargets));
+    render();
+  });
   $('#extra').addEventListener('input', render);
   $('#debtForm').addEventListener('submit', onDialogSubmit);
 }
@@ -412,7 +448,7 @@ function openDialog(debt = null, hint = '') {
   hintEl.innerHTML = hint;
   refreshOwnerOptions();
   const f = $('#debtForm');
-  f.owner.value = debt?.owner ?? localStorage.getItem('lastOwner') ?? 'Me';
+  if (f.owner) f.owner.value = debt?.owner ?? localStorage.getItem('lastOwner') ?? 'Me';
   f.name.value = debt?.name ?? '';
   f.balance.value = debt?.balance ?? '';
   f.apr.value = debt?.apr ?? '';
@@ -431,7 +467,7 @@ function refreshOwnerOptions() {
 function onDialogSubmit(e) {
   if (e.submitter?.value === 'cancel') return;
   const f = e.target;
-  const owner = (f.owner.value || 'Me').trim();
+  const owner = (f.owner?.value || 'Me').trim();
   localStorage.setItem('lastOwner', owner);
   const data = {
     name: f.name.value.trim(),
@@ -759,7 +795,7 @@ function openAccountDialog(acct = null) {
 function onAccountSubmit(e) {
   if (e.submitter?.value === 'cancel') return;
   const f = e.target;
-  const owner = (f.owner.value || 'Me').trim();
+  const owner = (f.owner?.value || 'Me').trim();
   localStorage.setItem('lastOwner', owner);
   const data = {
     name: f.name.value.trim(),
@@ -852,7 +888,8 @@ const CATEGORY_RULES = [
   [/insurance|geico|progressive|state farm|allstate|usaa.*ins/i, 'Insurance'],
   [/cvs|walgreens|pharmacy|\bdr\.|doctor|medical|dental|hospital|clinic|vision/i, 'Health'],
   [/atm|cash withdrawal|withdrawal/i, 'Cash'],
-  [/uber|lyft|parking|toll|metro|transit|airline|delta|united|american air/i, 'Transport'],
+  [/hotel|motel|\binn\b|resort|lodging|marriott|hilton|hyatt|holiday inn|airbnb|vrbo|expedia|booking\.?com|hotels\.?com|airline|airfare|\bflight\b|delta air|united air|american air|southwest air|jetblue|spirit air|frontier air|allegiant|rental car|enterprise rent|hertz|avis/i, 'Travel'],
+  [/uber|lyft|parking|toll|metro|transit/i, 'Transport'],
 ];
 function categorize(desc) {
   for (const [re, cat] of CATEGORY_RULES) if (re.test(desc)) return cat;
@@ -861,7 +898,7 @@ function categorize(desc) {
 
 // Canonical category list for dropdowns and budget targets.
 const CATEGORIES = ['Income', 'Transfer', 'Debt payment', 'Housing', 'Utilities', 'Groceries',
-  'Dining', 'Gas', 'Transport', 'Shopping', 'Subscriptions', 'Insurance', 'Health', 'Cash', 'Other'];
+  'Dining', 'Gas', 'Transport', 'Travel', 'Shopping', 'Subscriptions', 'Insurance', 'Health', 'Cash', 'Other'];
 
 function loadJSON(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
@@ -869,6 +906,55 @@ function loadJSON(key, fallback) {
 let categoryOverrides = loadJSON('categoryOverrides', {}); // txKey -> category
 let budgetTargets = loadJSON('budgetTargets', {});         // category -> monthly $ target
 let budgetFilter = { month: 'all', owner: 'all' };
+
+// Planned/known recurring costs the bank feed doesn't show yet (e.g. the son's
+// upcoming competitive-soccer fees). They count against the monthly bills and
+// the free-to-accelerate surplus so the plan stays realistic.
+let plannedExpenses = loadJSON('plannedExpenses', []); // [{ id, name, amount }]
+function savePlanned() { localStorage.setItem('plannedExpenses', JSON.stringify(plannedExpenses)); }
+const plannedTotal = () => plannedExpenses.reduce((s, p) => s + (+p.amount || 0), 0);
+
+// Smart plan — the tool builds the attack order for you, encoding the advisor's
+// logic: knock out near-limit high-APR cards first (fast credit-score + interest
+// wins), then everything else strictly by interest rate. No manual ordering.
+function smartOrder(active) {
+  const util = (d) => (d.creditLimit ? d.balance / d.creditLimit : 0);
+  const quickWin = (d) => util(d) >= 0.8 && (d.apr || 0) >= 20; // maxed-out pricey card
+  return [...active].sort((a, b) => {
+    const qa = quickWin(a), qb = quickWin(b);
+    if (qa !== qb) return qa ? -1 : 1;
+    if (Math.abs((b.apr || 0) - (a.apr || 0)) > 0.01) return (b.apr || 0) - (a.apr || 0);
+    return a.balance - b.balance; // tie: clear the smaller one first
+  });
+}
+function smartReason(d) {
+  const util = d.creditLimit ? Math.round((d.balance / d.creditLimit) * 100) : 0;
+  if (util >= 80 && (d.apr || 0) >= 20) return `${util}% utilization at ${(d.apr || 0).toFixed(1)}% — fast credit + interest win`;
+  if ((d.apr || 0) >= 20) return `${(d.apr || 0).toFixed(1)}% APR — expensive, hit it early`;
+  return `${(d.apr || 0).toFixed(1)}% APR`;
+}
+
+// Show the tool-built plan (order + why) when the Smart strategy is selected.
+function renderSmartPlan() {
+  const panel = $('#customOrderPanel');
+  if (!panel) return;
+  const isSmart = ($('#strategy')?.value === 'custom');
+  panel.hidden = !isSmart;
+  if (!isSmart) return;
+  const attack = attackableDebts();
+  if (!attack.length) { $('#smartPlanNote').innerHTML = ''; $('#customOrderList').innerHTML = ''; return; }
+  const ordered = smartOrder(attack);
+  const free = monthlySurplus();
+  $('#smartPlanNote').innerHTML = `<div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
+    <div class="rec-title">🧠 I built this plan for you</div>
+    <div class="rec-detail muted small">Ordered from your rates, balances and credit utilization, and funded by your budget: pay every minimum, then pile your free cash (~${fmt(free)}/mo) onto #1 until it's gone — then roll it to the next. Switch the strategy above if you'd rather compare.</div>
+  </div></div>`;
+  $('#customOrderList').innerHTML = ordered.map((d, i) => `
+    <div class="recurring-row">
+      <span><strong>${i + 1}.</strong> ${escapeHtml(d.name)} <span class="muted small">${smartReason(d)}${d.estimated ? ' · <span style="color:var(--warn)">est.</span>' : ''}</span></span>
+      <span class="bar-val">${fmt(d.balance)}</span>
+    </div>`).join('');
+}
 
 // Stable signature for a transaction (Plaid txns get fresh ids each pull).
 const txKey = (t) => `${t.date}|${t.amount}|${t.description}`;
@@ -1478,6 +1564,8 @@ function simulate(inputDebts, strategy, extra, priorityId) {
   const MAX_MONTHS = 1200; // 100-year safety cap
 
   const order = (active) => {
+    // Smart plan: the tool builds the order for the user (advisor's heuristic).
+    if (strategy === 'custom') return smartOrder(active);
     const sorted = [...active].sort((a, b) =>
       strategy === 'avalanche' ? b.apr - a.apr : a.balance - b.balance
     );
@@ -1538,7 +1626,9 @@ function render() {
   renderUntrackedDebts();
   renderDebts();
   renderAccounts();
+  renderBills();
   renderPaymentCalendar();
+  renderSmartPlan();
   renderPlan();
   renderRecommendations();
   renderAnalytics();
@@ -1593,29 +1683,47 @@ function cleanDebtName(desc) {
 // We fill the monthly payment; you set balance/APR or remove any that aren't
 // debts (removal is remembered so it won't come back).
 function syncAutoDetectedDebts() {
-  let added = 0;
+  let added = 0, changed = false;
   for (const s of allRecurringOut.filter(looksLikeUntrackedDebt)) {
     const key = normalizeMerchant(s.description);
-    if (debts.some((d) => d.autoKey === key)) continue; // already auto-added
+    const monthly = Math.round(s.monthlyAmount);
+    // Rough starting estimate from the payment so it enters the plan: store/BNPL
+    // cards carry ~25× their min; installment loans ~15× the payment. Clearly
+    // flagged as estimated — the user confirms the real balance via Edit.
+    const cardLike = /card|store|bread|apple|synchrony|comenity|klarna|affirm|afterpay|kohl|best buy|credit/i.test(s.description);
+    const estBalance = Math.max(50, Math.round((monthly * (cardLike ? 25 : 15)) / 50) * 50);
+
+    const existing = debts.find((d) => d.autoKey === key);
+    if (existing) {
+      // Backfill an estimate onto a bare auto-add (balance 0, still unconfirmed).
+      if (existing.needsTerms && !existing.balance) {
+        existing.balance = estBalance;
+        existing.apr = cardLike ? 26.99 : 13.99;
+        existing.estimated = true;
+        changed = true;
+      }
+      continue;
+    }
     debts.push({
       id: cryptoId(),
       name: cleanDebtName(s.description),
       owner: 'Me',
       type: 'auto-detected',
-      balance: 0,
-      apr: 0,
-      minPayment: Math.round(s.monthlyAmount),
+      balance: estBalance,
+      apr: cardLike ? 26.99 : 13.99,
+      minPayment: monthly,
       creditLimit: null,
       dueDate: null,
       source: 'manual',
       origin: 'auto',
       autoDetected: true,
       autoKey: key,
+      estimated: true,   // balance + APR are guesses until the user confirms
       needsTerms: true,
     });
     added++;
   }
-  if (added) saveManualDebts();
+  if (added || changed) saveManualDebts();
   return added;
 }
 
@@ -1813,7 +1921,8 @@ function renderDashUtil(attack) {
 
 function renderDashAttack(plan, attack, strategy) {
   if (!attack.length) { $('#dashAttack').innerHTML = '<p class="muted small">No debts to attack. 🎉</p>'; return; }
-  const ordered = [...attack].sort((a, b) => strategy === 'avalanche' ? (b.apr - a.apr) : (a.balance - b.balance));
+  const ordered = strategy === 'custom' ? smartOrder(attack)
+    : [...attack].sort((a, b) => strategy === 'avalanche' ? (b.apr - a.apr) : (a.balance - b.balance));
   const target = ordered[0];
   const nextUp = ordered.slice(1, 4);
   $('#dashAttack').innerHTML = `
@@ -1952,14 +2061,6 @@ function renderDebts() {
 
   if (!debts.length) return;
 
-  // Group debts by owner.
-  const groups = new Map();
-  for (const d of debts) {
-    const owner = d.owner || 'Me';
-    if (!groups.has(owner)) groups.set(owner, []);
-    groups.get(owner).push(d);
-  }
-
   const debtRow = (d) => {
     // Second line built from the rich Plaid Liabilities data we now keep:
     // proves the connection is live and current.
@@ -1974,7 +2075,7 @@ function renderDebts() {
         <div class="name">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
         <div class="meta">
           <span class="pill">${d.autoDetected ? '🔍 auto-detected' : d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
-          ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}</span>` : ''}
+          ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ ${d.estimated ? 'balance &amp; APR estimated — Edit to confirm' : `click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}`}</span>` : ''}
         </div>
         ${factLine}
       </div>
@@ -1988,28 +2089,11 @@ function renderDebts() {
     </div>`;
   };
 
-  // Only show owner headers when there's more than one person.
-  const multiOwner = groups.size > 1;
-  let html = '';
-  for (const [owner, items] of groups) {
-    const subtotal = items.reduce((s, d) => s + d.balance, 0);
-    if (multiOwner) {
-      html += `<div class="owner-header">
-        <span>${escapeHtml(owner)}</span>
-        <span class="muted small">${items.length} debt${items.length > 1 ? 's' : ''} · ${fmt(subtotal)}</span>
-      </div>`;
-    }
-    html += items.map(debtRow).join('');
-  }
-
-  if (multiOwner) {
-    const total = debts.reduce((s, d) => s + d.balance, 0);
-    html += `<div class="owner-header household">
-      <span>Household total</span><span>${fmt(total)}</span>
-    </div>`;
-  }
-
-  list.innerHTML = html;
+  // One flat list — a debt is a debt; no need to track whose it is.
+  const total = debts.reduce((s, d) => s + d.balance, 0);
+  list.innerHTML =
+    `<div class="owner-header household"><span>${debts.length} debt${debts.length > 1 ? 's' : ''}</span><span>${fmt(total)}</span></div>` +
+    debts.map(debtRow).join('');
   list.querySelectorAll('[data-detail]').forEach((el) =>
     el.addEventListener('click', (e) => {
       if (e.target.closest('.row-actions')) return; // let Edit/✕ do their thing
@@ -2395,9 +2479,10 @@ function monthlySurplus() {
   const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   // Subtract ALL debt minimums (cards + the inferred auto-loan payments), since
   // those already-committed payments aren't in `spend` (they post as transfers/
-  // debt payments). This is the true cash free to throw as EXTRA at the plan.
+  // debt payments), plus planned costs the bank can't see yet (e.g. soccer).
+  // This is the true cash free to throw as EXTRA at the plan.
   const minsMonthly = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
-  const surplusMonthly = (income - spend) / months - minsMonthly;
+  const surplusMonthly = (income - spend) / months - minsMonthly - plannedTotal();
   return Math.max(0, Math.floor(surplusMonthly / 5) * 5);
 }
 
@@ -2408,6 +2493,72 @@ function monthlyExpenses() {
   const months = monthSpan();
   const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   return spend / months;
+}
+
+// Average monthly spend per category (real outflow only) — powers the bills
+// breakdown and the "build budget from my habits" feature.
+function monthlyByCategory() {
+  const months = monthSpan();
+  const byCat = {};
+  for (const t of transactions) {
+    if (t.amount >= 0 || !isFlowCat(catOf(t))) continue;
+    byCat[catOf(t)] = (byCat[catOf(t)] || 0) + Math.abs(t.amount);
+  }
+  for (const k in byCat) byCat[k] /= months;
+  return byCat;
+}
+
+// Monthly bills (recurring cash-out) vs. total debt (balance owed) — two very
+// different numbers the user wanted separated. Whatever's left funds the plan.
+function renderBills() {
+  const card = $('#billsCard');
+  if (!card) return;
+  const hasData = transactions.length > 0 || debts.length > 0 || plannedExpenses.length > 0;
+  card.hidden = !hasData;
+  if (!hasData) return;
+
+  const byCat = monthlyByCategory();
+  const billCats = ['Housing', 'Utilities', 'Insurance', 'Subscriptions'];
+  const fixedBills = billCats.reduce((s, c) => s + (byCat[c] || 0), 0);
+  const debtMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
+  const planned = plannedTotal();
+  const living = monthlyExpenses();
+  const income = verifiedMonthlyIncome();
+  const totalDebt = debts.reduce((s, d) => s + (d.balance || 0), 0);
+  const monthlyBills = debtMin + fixedBills + planned;   // fixed obligations
+  const allOut = living + debtMin + planned;             // everything leaving
+  const free = Math.max(0, income - allOut);
+
+  $('#billsSummary').innerHTML = `
+    <div class="stat"><div class="key">Total debt (owed)</div><div class="value" style="color:var(--danger)">${fmt(totalDebt)}</div></div>
+    <div class="stat"><div class="key">Monthly bills</div><div class="value">${fmt(monthlyBills)}/mo</div></div>
+    <div class="stat"><div class="key">All monthly spending</div><div class="value">${fmt(allOut)}/mo</div></div>
+    <div class="stat"><div class="key">Free after everything</div><div class="value good">${fmt(free)}/mo</div></div>`;
+
+  const rows = [
+    ['Debt minimums', debtMin],
+    ...billCats.map((c) => [c, byCat[c] || 0]).filter(([, v]) => v > 0),
+    ...(planned ? [['Planned costs', planned]] : []),
+  ].sort((a, b) => b[1] - a[1]);
+  const max = Math.max(...rows.map((r) => r[1]), 1);
+  $('#billsBreakdown').innerHTML = rows.map(([k, v]) => `
+    <div class="bar-row" style="grid-template-columns:130px 1fr 78px">
+      <span class="bar-label">${escapeHtml(k)}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${(v / max) * 100}%;background:var(--danger)"></div></div>
+      <span class="bar-val">${fmt(v)}/mo</span>
+    </div>`).join('') || '<p class="muted small">No recurring bills detected yet.</p>';
+
+  $('#plannedList').innerHTML = plannedExpenses.length ? plannedExpenses.map((p) => `
+    <div class="recurring-row">
+      <span>${escapeHtml(p.name)}</span>
+      <span class="bar-val">${fmt(p.amount)}/mo</span>
+      <button class="ghost" data-delplan="${p.id}" title="Remove">✕</button>
+    </div>`).join('') : '<p class="muted small">None yet. Add costs like club sports, tuition, or a new bill.</p>';
+  $('#plannedList').querySelectorAll('[data-delplan]').forEach((b) => b.addEventListener('click', () => {
+    plannedExpenses = plannedExpenses.filter((p) => p.id !== b.dataset.delplan);
+    savePlanned();
+    render();
+  }));
 }
 
 // The biggest "wants" category we could realistically cut in half.

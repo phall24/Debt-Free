@@ -379,7 +379,7 @@ function mapPlaidCategory(primary) {
     PERSONAL_CARE: 'Health',
     RENT_AND_UTILITIES: 'Utilities',
     TRANSPORTATION: 'Transport',
-    TRAVEL: 'Transport',
+    TRAVEL: 'Travel',
     HOME_IMPROVEMENT: 'Shopping',
   };
   return map[primary] ?? null; // null → client falls back to keyword categorization

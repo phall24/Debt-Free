@@ -109,6 +109,28 @@
       <div id="netWorth"></div>
     </section>
 
+    <!-- Monthly bills vs. total debt -->
+    <section class="card" id="billsCard" hidden>
+      <div class="row spread">
+        <h2>🧾 Monthly bills &amp; budget</h2>
+        <button id="addPlannedBtn" class="ghost">＋ Add a planned cost</button>
+      </div>
+      <p class="muted small">Two different things: <strong>monthly bills</strong> are the cash that leaves every month; <strong>total debt</strong> is the balance you owe. Whatever's left after your real spending funds the payoff plan.</p>
+      <div id="billsSummary" class="stats"></div>
+      <div class="analytics-grid" style="margin-top:16px">
+        <div class="chart-box">
+          <h3>Where your monthly money goes</h3>
+          <p class="muted small">Fixed bills + debt minimums + planned costs, from your real spending.</p>
+          <div id="billsBreakdown"></div>
+        </div>
+        <div class="chart-box">
+          <h3>📌 Planned / known costs</h3>
+          <p class="muted small">Costs the bank feed doesn't show yet (added to your bills so the plan stays honest).</p>
+          <div id="plannedList"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Upcoming payments / due dates -->
     <section class="card" id="calendarCard" hidden>
       <h2>📅 Upcoming payments</h2>
@@ -124,6 +146,7 @@
         <label>
           Strategy
           <select id="strategy">
+            <option value="custom">🧠 Smart plan — built for you (recommended)</option>
             <option value="avalanche">Avalanche — pay highest interest first (saves the most money)</option>
             <option value="snowball">Snowball — pay smallest balance first (quick wins)</option>
           </select>
@@ -135,6 +158,11 @@
             <input type="number" id="extra" min="0" step="25" value="100" />
           </div>
         </label>
+        <button id="useBudgetBtn" class="ghost" title="Set the extra to the cash your budget leaves free">💰 Use my free cash</button>
+      </div>
+      <div id="customOrderPanel" hidden>
+        <div id="smartPlanNote"></div>
+        <div id="customOrderList"></div>
       </div>
     </section>
 
@@ -215,6 +243,7 @@
         <div class="budget-filters">
           <label>Month <select id="filterMonth"></select></label>
           <label>Who <select id="filterOwner"></select></label>
+          <button id="autoBudgetBtn" class="ghost" title="Set targets to your average spending in each category">📊 Build budget from my spending</button>
           <button id="budgetTargetsBtn" class="ghost">🎯 Set budget targets</button>
         </div>
 
@@ -318,7 +347,6 @@
     <form method="dialog" id="debtForm">
       <h3 id="dialogTitle">Add a debt</h3>
       <div id="statementHint" class="banner warn" hidden></div>
-      <label>Whose debt? <input name="owner" list="ownerOptions" placeholder="e.g. Me, Wife, Joint" /></label>
       <datalist id="ownerOptions"></datalist>
       <label>Name <input name="name" required placeholder="e.g. Visa card" /></label>
       <label>Balance owed <input name="balance" type="number" min="0" step="0.01" required placeholder="2500" /></label>
