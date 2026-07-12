@@ -8,6 +8,7 @@ let debtOverrides = loadDebtOverrides(); // account_id -> edited fields (apr, pa
 let accounts = loadAccounts();           // checking/savings (assets)
 let transactions = loadTransactions();   // imported from CSV
 let recurringStreams = [];               // Plaid-detected recurring outflows (subscriptions/bills)
+let allRecurringOut = [];                // full recurring outflows incl. loan payments (for untracked-debt detection)
 let incomeStreams = [];                  // Plaid-detected recurring inflows (paychecks/income)
 let lastSyncedAt = null;                 // ISO timestamp of the last Plaid liabilities pull
 let plaidConfigured = false;
@@ -318,10 +319,12 @@ async function pullPlaidTransactions() {
 async function pullRecurring() {
   try {
     const { outflows = [], inflows = [], errors } = await fetch('/api/recurring').then((r) => r.json());
-    // Keep the recurring panel focused on genuinely cuttable spend — drop
-    // transfers and loan/debt payments (those are already tracked as debts).
-    recurringStreams = outflows.filter((s) =>
-      s.isActive && s.category !== 'TRANSFER_OUT' && s.category !== 'LOAN_PAYMENTS');
+    // Full active outflow set — used to detect debts you PAY but don't track.
+    allRecurringOut = outflows.filter((s) => s.isActive);
+    // The recurring panel focuses on genuinely cuttable spend — drop transfers
+    // and loan/debt payments (those are, or should be, tracked as debts).
+    recurringStreams = allRecurringOut.filter((s) =>
+      s.category !== 'TRANSFER_OUT' && s.category !== 'LOAN_PAYMENTS');
     // Plaid's recurring categories are noisy (paychecks land as FOOD/TRANSFER,
     // and fees show up as inflows). Treat any active deposit as income UNLESS
     // it's clearly a fee/interest charge or bank dividend noise.
@@ -340,6 +343,7 @@ async function unlinkAll() {
   debts = debts.filter((d) => d.source === 'manual');
   accounts = accounts.filter((a) => a.source !== 'plaid');
   recurringStreams = [];
+  allRecurringOut = [];
   incomeStreams = [];
   excludedKeys.clear();
   saveExcluded();
@@ -1288,6 +1292,11 @@ function incomeTrendForKey(key) {
   if (pct <= -12) return { dir: 'down', pct };
   return { dir: 'flat', pct };
 }
+// VA disability compensation (VACP TREAS 310) is federal-income-tax-free — worth
+// flagging for this military/veteran household; it changes marginal-dollar math.
+function isTaxFreeIncome(desc) {
+  return /vacp|va comp|veterans? affairs|disability comp|treas 310/i.test(desc);
+}
 function trendMarker(key) {
   const t = incomeTrendForKey(key);
   if (t.dir === 'up') return `<span title="Up ${t.pct}% vs prior months" style="color:var(--accent)">▲</span> `;
@@ -1327,9 +1336,10 @@ function renderIncome() {
     sources.map((r) => {
       const freq = FREQ_LABEL[r.frequency] || (r.frequency || '').toLowerCase();
       const tag = r.nextDate ? ` · next ${r.nextDate}` : (r.detected ? ' · detected' : '');
+      const taxFree = isTaxFreeIncome(r.description) ? ' · <span style="color:var(--accent)" title="VA disability compensation is exempt from federal income tax">🏅 tax-free</span>' : '';
       return `
       <div class="recurring-row">
-        <span>${trendMarker(r.key)}${escapeHtml(r.description)}</span>
+        <span>${trendMarker(r.key)}${escapeHtml(r.description)}${taxFree}</span>
         <span class="freq">${freq}${tag}</span>
         <span class="bar-val" style="color:var(--accent)">${fmt2(r.monthlyAmount)}/mo</span>
       </div>`;
@@ -1516,6 +1526,7 @@ function simulate(inputDebts, strategy, extra, priorityId) {
 // ===========================================================================
 function render() {
   renderDashboard();
+  renderUntrackedDebts();
   renderDebts();
   renderAccounts();
   renderPaymentCalendar();
@@ -1523,6 +1534,73 @@ function render() {
   renderRecommendations();
   renderAnalytics();
   renderBudget();
+}
+
+// ---- Untracked debt detection ------------------------------------------------
+// You can be PAYING a debt every month (it shows in the recurring feed) without
+// that debt's balance being in the plan — Plaid only returns balances for cards
+// and a few loan types. These recurring payments look like debt but have no
+// matching account, so the payoff engine and surplus math are blind to them.
+const DEBT_HINT_RE = /finance|lending|\bloan\b|mariner|bread|affirm|klarna|afterpay|acceptance|\bd ?v ?d\b|apple card|furnmart|furniture|synchrony|comenity|one ?main|lightstream|sofi|upstart|best egg|prosper|avant/i;
+let dismissedDebtHints = loadJSON('dismissedDebtHints', []);
+
+function looksLikeUntrackedDebt(s) {
+  if (s.direction !== 'out') return false;
+  const desc = s.description || '';
+  if (TRANSFER_RE.test(desc)) return false;
+  // Require a NAMED installment/store/BNPL lender. This deliberately skips
+  // generic card autopays (AMEX/CITI/Capital One ACH), which are payments to
+  // cards already tracked via Plaid — keeping this list high-precision.
+  if (!DEBT_HINT_RE.test(desc)) return false;
+  if (dismissedDebtHints.includes(normalizeMerchant(desc))) return false;
+  // Already tracked? Match a DISTINCTIVE (brand) word from an existing debt
+  // name — skip generic words like "card"/"visa"/"loan" that appear across many
+  // debts and would false-match (e.g. a card named "...Express® Card" would
+  // otherwise flag "Apple Card" as already tracked).
+  const d = desc.toLowerCase();
+  const tracked = debts.some((x) => (x.name || '').toLowerCase().replace(/[®™]/g, '').split(/\s+/)
+    .some((w) => w.length > 3 && !DEBT_NAME_STOPWORDS.has(w) && d.includes(w)));
+  return !tracked;
+}
+// Generic tokens common to many card/loan names — not distinctive enough to
+// prove a recurring payment matches a specific tracked debt.
+const DEBT_NAME_STOPWORDS = new Set(['card', 'cards', 'visa', 'loan', 'loans', 'credit',
+  'cash', 'rewards', 'reward', 'world', 'elite', 'select', 'platinum', 'gold', 'bank',
+  'line', 'used', 'vehicle', 'checking', 'savings', 'mastercard', 'express', 'american',
+  'preferred', 'signature', 'account', 'member', 'aadvantage']);
+
+function renderUntrackedDebts() {
+  const box = $('#untrackedDebts');
+  if (!box) return;
+  const hints = allRecurringOut.filter(looksLikeUntrackedDebt).sort((a, b) => b.monthlyAmount - a.monthlyAmount);
+  if (!hints.length) { box.innerHTML = ''; return; }
+  const total = hints.reduce((s, h) => s + h.monthlyAmount, 0);
+  box.innerHTML = `
+    <div class="banner warn" style="border-color:var(--warn)">
+      <strong>💡 ${hints.length} possible untracked debt${hints.length > 1 ? 's' : ''} (~${fmt(total)}/mo in payments)</strong> —
+      you're paying these every month but they're not in your debt list, so your plan and surplus are understated. Add each so the payoff engine can see it.
+      <div style="margin-top:8px">
+        ${hints.map((h, i) => `
+          <div class="recurring-row">
+            <span>${escapeHtml(h.description)}</span>
+            <span class="freq">${fmt2(h.monthlyAmount)}/mo</span>
+            <span style="display:flex;gap:6px">
+              <button class="primary" data-addhint="${i}">＋ Add as debt</button>
+              <button class="ghost" data-skiphint="${i}">Not a debt</button>
+            </span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  box.querySelectorAll('[data-addhint]').forEach((b) => b.addEventListener('click', () => {
+    const h = hints[+b.dataset.addhint];
+    openDialog({ name: h.description.replace(/\s+/g, ' ').trim(), minPayment: Math.round(h.monthlyAmount), origin: 'manual' },
+      'This looks like a debt you pay monthly. Add its balance and APR so it joins your payoff plan.');
+  }));
+  box.querySelectorAll('[data-skiphint]').forEach((b) => b.addEventListener('click', () => {
+    dismissedDebtHints.push(normalizeMerchant(hints[+b.dataset.skiphint].description));
+    localStorage.setItem('dismissedDebtHints', JSON.stringify(dismissedDebtHints));
+    renderUntrackedDebts();
+  }));
 }
 
 // Auto/vehicle loans are big but low-APR — per the plan, we keep them at
@@ -1541,6 +1619,14 @@ function autoLoans() {
 // Per-payment "paid this month" checklist state, keyed by debt + month.
 let paidThisMonth = loadJSON('paidThisMonth', {});
 function paidKey(d) { return `${d.account_id || d.name}|${new Date().toISOString().slice(0, 7)}`; }
+// A bill counts as paid this month if you checked it off OR — for Plaid debts —
+// the bank reports a payment posted this month. So after a ↻ Refresh, bills you
+// actually paid auto-check themselves.
+function isPaidThisMonth(d) {
+  const m = new Date().toISOString().slice(0, 7);
+  if (d.lastPaymentDate && d.lastPaymentDate.slice(0, 7) === m) return true;
+  return !!paidThisMonth[paidKey(d)];
+}
 function togglePaid(d) {
   const k = paidKey(d);
   paidThisMonth[k] = !paidThisMonth[k];
@@ -1565,6 +1651,8 @@ function renderDashboard() {
   const netWorth = assets - attackBalance - autoBalance;
   const income = verifiedMonthlyIncome();
   const { monthly: bleed } = feeBreakdown();
+  const monthlyExp = monthlyExpenses();
+  const efMonths = monthlyExp ? assets / monthlyExp : null; // emergency-fund coverage
 
   // ---- Hero KPIs -------------------------------------------------------------
   const freeDate = plan.stalled ? 'stalled — raise payment' : plan.months <= 0 ? 'done!' : monthsToDate(plan.months);
@@ -1574,6 +1662,7 @@ function renderDashboard() {
     <div class="stat"><div class="key">Cards debt-free</div><div class="value good">${freeDate}</div></div>
     <div class="stat"><div class="key">Interest you'll save</div><div class="value good">${fmt(interestSaved)}</div></div>
     <div class="stat"><div class="key">Net worth</div><div class="value ${netWorth >= 0 ? 'good' : ''}" style="${netWorth < 0 ? 'color:var(--danger)' : ''}">${fmt(netWorth)}</div></div>
+    ${efMonths != null ? `<div class="stat" title="Liquid savings ÷ average monthly spending. Aim for ~1 month before max-attacking debt, then build to 3–6."><div class="key">Emergency fund</div><div class="value" style="color:${efMonths >= 1 ? 'var(--accent)' : 'var(--warn)'}">${efMonths.toFixed(1)} mo</div></div>` : ''}
     <div class="stat"><div class="key">Bleeding to interest/fees</div><div class="value" style="color:var(--danger)">${fmt(bleed)}/mo</div></div>
     ${autoBalance ? `<div class="stat"><div class="key">Auto loans (minimums)</div><div class="value muted">${fmt(autoBalance)}</div></div>` : ''}
   `;
@@ -1616,16 +1705,17 @@ function renderDashChecklist() {
     .sort((a, b) => a.due - b.due);
   if (!rows.length) { $('#dashChecklist').innerHTML = '<p class="muted small">No payments due in the next 31 days.</p>'; return; }
   const totalDue = rows.reduce((s, x) => s + (x.d.minPayment || 0), 0);
-  const paidCount = rows.filter((x) => paidThisMonth[paidKey(x.d)]).length;
+  const paidCount = rows.filter((x) => isPaidThisMonth(x.d)).length;
   $('#dashChecklist').innerHTML =
     `<div class="recurring-row" style="font-weight:600"><span>${paidCount}/${rows.length} paid</span><span class="muted small">${fmt(totalDue)} due</span><span></span></div>` +
     rows.map(({ d, due }) => {
       const n = daysUntil(due);
-      const paid = !!paidThisMonth[paidKey(d)];
+      const paid = isPaidThisMonth(d);
+      const autoPaid = paid && d.lastPaymentDate && d.lastPaymentDate.slice(0, 7) === new Date().toISOString().slice(0, 7);
       const urgent = !paid && (d.isOverdue || n <= 5);
       const when = due.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      return `<div class="recurring-row clickable" data-paid="${d.id}" title="Click to mark paid">
-        <span>${paid ? '✅' : (urgent ? '🔴' : '⬜')} <span style="${paid ? 'text-decoration:line-through;opacity:.6' : ''}">${escapeHtml(d.name)}</span></span>
+      return `<div class="recurring-row clickable" data-paid="${d.id}" title="${autoPaid ? 'Your bank shows this was paid this month' : 'Click to mark paid'}">
+        <span>${paid ? '✅' : (urgent ? '🔴' : '⬜')} <span style="${paid ? 'text-decoration:line-through;opacity:.6' : ''}">${escapeHtml(d.name)}</span>${autoPaid ? ' <span class="muted small">auto</span>' : ''}</span>
         <span class="freq" style="${urgent ? 'color:var(--danger)' : ''}">${when}${d.isOverdue ? ' · overdue' : ''}</span>
         <span class="bar-val">${d.minPayment ? fmt2(d.minPayment) : '—'}</span>
       </div>`;
@@ -1666,21 +1756,24 @@ function renderDashAttack(plan, attack, strategy) {
 }
 
 function renderDashIncome(income, plan, extra) {
-  const minTotal = attackableDebts().reduce((s, d) => s + (d.minPayment || 0), 0);
+  // Honest cash-flow waterfall: income − living − ALL minimums (incl. the
+  // inferred auto-loan payments) = the cash genuinely free to accelerate payoff.
+  const living = monthlyExpenses();
   const autoMin = autoLoans().reduce((s, d) => s + (d.minPayment || 0), 0);
-  const target = minTotal + autoMin + extra;
-  const headroom = income - target;
-  const surplus = monthlySurplus();
+  const cardMin = attackableDebts().reduce((s, d) => s + (d.minPayment || 0), 0);
+  const allMin = autoMin + cardMin;
+  const free = monthlySurplus(); // income − living − all minimums (floored)
   const aura = incomeSources().find((s) => /aura/i.test(s.description));
   const auraDown = aura && incomeTrendForKey(aura.key).dir === 'down';
   $('#dashIncome').innerHTML = `
     <div class="recurring-row" style="font-weight:600"><span>${fmt(income)}/mo income</span><span class="muted small">verified</span><span></span></div>
-    <div class="recurring-row"><span>Plan needs (mins + extra)</span><span></span><span class="bar-val">${fmt(target)}/mo</span></div>
-    <div class="recurring-row"><span>Headroom to go faster</span><span></span><span class="bar-val" style="color:${headroom >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(headroom)}/mo</span></div>
-    ${surplus > extra ? `<button class="primary" id="dashUseSurplus" style="margin-top:8px;width:100%">⚡ Put my ~${fmt(surplus)}/mo surplus toward debt</button><p class="muted small" style="margin-top:6px">Your spending leaves ~${fmt(surplus)}/mo unspent — one click sets that as your extra payment and shows how much sooner you're debt-free.</p>` : ''}
-    ${auraDown ? `<p class="muted small">📌 AURAOPS income has been trending down — plan is built on the recent average. Your wife's move to full-time at Royse City ISD will add headroom automatically as it posts.</p>` : ''}`;
+    <div class="recurring-row"><span>− Living expenses</span><span></span><span class="bar-val">${fmt(living)}/mo</span></div>
+    <div class="recurring-row"><span>− Debt minimums</span><span class="freq">${autoMin ? `incl. ${fmt(autoMin)} auto loans` : ''}</span><span class="bar-val">${fmt(allMin)}/mo</span></div>
+    <div class="recurring-row" style="font-weight:600;border-top:1px solid var(--border);padding-top:6px"><span>= Free to accelerate</span><span></span><span class="bar-val" style="color:${free > 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(free)}/mo</span></div>
+    ${free > extra ? `<button class="primary" id="dashUseSurplus" style="margin-top:8px;width:100%">⚡ Put my ~${fmt(free)}/mo free cash toward debt</button>` : ''}
+    ${auraDown ? `<p class="muted small" style="margin-top:6px">📌 AURAOPS income has been trending down — plan is built on the recent average. Your wife's move to full-time at Royse City ISD will add to this automatically as it posts.</p>` : ''}`;
   $('#dashUseSurplus')?.addEventListener('click', () => {
-    $('#extra').value = surplus;
+    $('#extra').value = free;
     render();
     $('#resultsCard')?.scrollIntoView({ behavior: 'smooth' });
   });
@@ -2049,19 +2142,22 @@ function relatedTransactions(d) {
 
 function renderPlan() {
   const card = $('#resultsCard');
-  if (!debts.length) { card.hidden = true; return; }
+  // Plan on the debts we're actually attacking — auto loans are held at
+  // minimums and excluded so they don't distort the payoff date/interest.
+  const pd = attackableDebts();
+  if (!pd.length) { card.hidden = true; return; }
   card.hidden = false;
 
   const strategy = $('#strategy').value;
   const extra = parseFloat($('#extra').value) || 0;
 
-  const plan = simulate(debts, strategy, extra);
-  const totalDebt = debts.reduce((s, d) => s + d.balance, 0);
+  const plan = simulate(pd, strategy, extra);
+  const totalDebt = pd.reduce((s, d) => s + d.balance, 0);
 
   // Compare against the alternative strategy and against minimums-only.
   const other = strategy === 'avalanche' ? 'snowball' : 'avalanche';
-  const otherPlan = simulate(debts, other, extra);
-  const minOnly = simulate(debts, strategy, 0);
+  const otherPlan = simulate(pd, other, extra);
+  const minOnly = simulate(pd, strategy, 0);
 
   if (plan.stalled) {
     $('#stats').innerHTML = `<div class="banner warn">⚠️ With these numbers the debt never gets paid off —
@@ -2118,17 +2214,18 @@ function renderPlan() {
 // ===========================================================================
 function renderRecommendations() {
   const card = $('#recsCard');
-  if (!debts.length) { card.hidden = true; return; }
+  const pd = attackableDebts(); // exclude auto loans from the attack math
+  if (!pd.length) { card.hidden = true; return; }
 
   const strategy = $('#strategy').value;
   const extra = parseFloat($('#extra').value) || 0;
-  const baseline = simulate(debts, strategy, extra);
+  const baseline = simulate(pd, strategy, extra);
   if (baseline.stalled) { card.hidden = true; return; }
   card.hidden = false;
 
   // Impact of paying `newExtra` total per month, measured against the baseline.
   const impactOf = (newExtra, strat = strategy) => {
-    const p = simulate(debts, strat, Math.max(0, newExtra));
+    const p = simulate(pd, strat, Math.max(0, newExtra));
     return { plan: p, monthsSaved: baseline.months - p.months, interestSaved: baseline.totalInterest - p.totalInterest, newExtra };
   };
 
@@ -2136,7 +2233,7 @@ function renderRecommendations() {
 
   // 1. Switch to avalanche if it saves interest (costs nothing).
   if (strategy !== 'avalanche') {
-    const av = simulate(debts, 'avalanche', extra);
+    const av = simulate(pd, 'avalanche', extra);
     const saved = baseline.totalInterest - av.totalInterest;
     if (saved >= 1) {
       recs.push({
@@ -2182,7 +2279,7 @@ function renderRecommendations() {
   }
 
   // Highest-APR callout (informational, no apply button).
-  const worst = [...debts].sort((a, b) => b.apr - a.apr)[0];
+  const worst = [...pd].sort((a, b) => b.apr - a.apr)[0];
   const worstBurn = worst.balance * (worst.apr / 100 / 12);
 
   recs.sort((a, b) => b.monthsSaved - a.monthsSaved);
@@ -2229,7 +2326,21 @@ function monthlySurplus() {
     ? verified * months
     : transactions.filter((t) => isFlowCat(catOf(t)) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
   const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
-  return Math.max(0, Math.floor(((income - spend) / months) / 5) * 5);
+  // Subtract ALL debt minimums (cards + the inferred auto-loan payments), since
+  // those already-committed payments aren't in `spend` (they post as transfers/
+  // debt payments). This is the true cash free to throw as EXTRA at the plan.
+  const minsMonthly = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
+  const surplusMonthly = (income - spend) / months - minsMonthly;
+  return Math.max(0, Math.floor(surplusMonthly / 5) * 5);
+}
+
+// Average monthly living expenses (real spend, excluding transfers and debt
+// payments) — the denominator for the emergency-fund gauge.
+function monthlyExpenses() {
+  if (!transactions.length) return 0;
+  const months = monthSpan();
+  const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
+  return spend / months;
 }
 
 // The biggest "wants" category we could realistically cut in half.
@@ -2249,9 +2360,10 @@ function biggestDiscretionaryCut() {
 }
 
 function renderScenarioTable(strategy, extra, baseline) {
+  const pd = attackableDebts(); // exclude auto loans, consistent with the plan
   const adds = [...new Set([0, 25, 50, 100, 200, 300].map((a) => extra + a))];
   const rows = adds.map((e) => {
-    const p = simulate(debts, strategy, e);
+    const p = simulate(pd, strategy, e);
     if (p.stalled) return '';
     const saved = baseline.totalInterest - p.totalInterest;
     const sooner = baseline.months - p.months;
@@ -2278,12 +2390,13 @@ const COLORS = ['#3fb950', '#58a6ff', '#d29922', '#f85149', '#bc8cff', '#39c5cf'
 
 function renderAnalytics() {
   const card = $('#analyticsCard');
-  if (!debts.length) { card.hidden = true; return; }
+  const pd = attackableDebts(); // exclude auto loans, consistent with the plan
+  if (!pd.length) { card.hidden = true; return; }
 
   const strategy = $('#strategy').value;
   const extra = parseFloat($('#extra').value) || 0;
-  const plan = simulate(debts, strategy, extra);
-  const minOnly = simulate(debts, strategy, 0);
+  const plan = simulate(pd, strategy, extra);
+  const minOnly = simulate(pd, strategy, 0);
 
   if (plan.stalled) { card.hidden = true; return; }
   card.hidden = false;
