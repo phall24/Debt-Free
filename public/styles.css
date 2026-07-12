@@ -85,6 +85,13 @@ main {
 .cal-bill { background: #3a1d22; color: #f2c0c6; border-radius: 4px; padding: 1px 4px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cal-bill.pay { background: #3d3410; color: var(--warn); }
 
+/* Only the debt name opens the detail popup (prevents accidental modal opens). */
+.detail-link { cursor: pointer; display: inline-block; }
+.detail-link:hover { text-decoration: underline; }
+/* Give the remove/edit buttons a bigger, clearer hit target. */
+.row-actions button { padding: 7px 11px; }
+.row-actions button[data-del] { font-size: 1rem; }
+
 /* Stack the sidebar on top on narrower screens. */
 @media (max-width: 960px) {
   .app-shell { flex-direction: column; }

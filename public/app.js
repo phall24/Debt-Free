@@ -82,6 +82,7 @@ async function init() {
   // any detected untracked debts and re-render.
   if (plaidConfigured) pullRecurring().then(() => {
     syncAutoDetectedDebts();
+    seedPaySchedule();
     // Default Smart plan funds itself from the (now-computable) free cash.
     if ($('#strategy').value === 'custom') $('#extra').value = monthlySurplus();
     render();
@@ -915,6 +916,12 @@ let plannedExpenses = loadJSON('plannedExpenses', []); // [{ id, name, amount }]
 function savePlanned() { localStorage.setItem('plannedExpenses', JSON.stringify(plannedExpenses)); }
 const plannedTotal = () => plannedExpenses.reduce((s, p) => s + (+p.amount || 0), 0);
 
+// User-stated pay schedule overrides (they know their paydays better than the
+// bank's post dates). Keyed by income-source key → { days:[5,20] } for
+// semi-monthly/monthly, or { anchorDate:'YYYY-MM-DD' } for weekly/biweekly.
+let payOverrides = loadJSON('payOverrides', {});
+function savePayOverrides() { localStorage.setItem('payOverrides', JSON.stringify(payOverrides)); }
+
 // Smart plan — the tool builds the attack order for you, encoding the advisor's
 // logic: knock out near-limit high-APR cards first (fast credit-score + interest
 // wins), then everything else strictly by interest rate. No manual ordering.
@@ -1687,7 +1694,8 @@ function cleanDebtName(desc) {
 // debts (removal is remembered so it won't come back).
 function syncAutoDetectedDebts() {
   let added = 0, changed = false;
-  for (const s of allRecurringOut.filter(looksLikeUntrackedDebt)) {
+  for (const s of allRecurringOut) {
+    if (s.direction !== 'out') continue;
     const key = normalizeMerchant(s.description);
     const monthly = Math.round(s.monthlyAmount);
     // Rough starting estimate from the payment so it enters the plan: store/BNPL
@@ -1696,10 +1704,11 @@ function syncAutoDetectedDebts() {
     const cardLike = /card|store|bread|apple|synchrony|comenity|klarna|affirm|afterpay|kohl|best buy|credit/i.test(s.description);
     const estBalance = Math.max(50, Math.round((monthly * (cardLike ? 25 : 15)) / 50) * 50);
 
+    // Backfill an estimate onto an existing bare auto-add (matched by key, even
+    // though its name now makes it look "tracked").
     const existing = debts.find((d) => d.autoKey === key);
     if (existing) {
-      // Backfill an estimate onto a bare auto-add (balance 0, still unconfirmed).
-      if (existing.needsTerms && !existing.balance) {
+      if (existing.autoDetected && existing.needsTerms && !existing.balance) {
         existing.balance = estBalance;
         existing.apr = cardLike ? 26.99 : 13.99;
         existing.estimated = true;
@@ -1707,6 +1716,8 @@ function syncAutoDetectedDebts() {
       }
       continue;
     }
+    // New: only add if it genuinely looks like an untracked debt.
+    if (!looksLikeUntrackedDebt(s)) continue;
     debts.push({
       id: cryptoId(),
       name: cleanDebtName(s.description),
@@ -1981,18 +1992,103 @@ const isoLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
 const shortName = (n) => (n || '').replace(/®|™/g, '').trim().slice(0, 14);
 function cadenceDays(freq) { return { WEEKLY: 7, BIWEEKLY: 14, SEMI_MONTHLY: 15, MONTHLY: 30, ANNUALLY: 365 }[freq] || 30; }
 
+// The actual day(s)-of-month a source pays, learned from its real deposits.
+// This makes semi-monthly pay land on the true days (e.g. BIO WORLD 5th & 20th)
+// instead of drifting off Plaid's estimate.
+function payDaysOfMonth(s, n) {
+  if (payOverrides[s.key]?.days?.length) return payOverrides[s.key].days; // user-stated wins
+  const days = transactions
+    .filter((t) => t.amount > 0 && normalizeMerchant(t.description) === s.key)
+    .map((t) => new Date(t.date + 'T00:00:00').getDate());
+  if (!days.length) return s.nextDate ? [new Date(s.nextDate + 'T00:00:00').getDate()] : [];
+  const counts = {};
+  for (const d of days) counts[d] = (counts[d] || 0) + 1;
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([d]) => +d).slice(0, n);
+}
+
+// Seed the user's stated pay schedule once: BIO WORLD pays the 5th & 20th,
+// VA disability (VACP) lands the 1st of every month.
+function seedPaySchedule() {
+  if (localStorage.getItem('seededPaySchedule')) return;
+  const src = incomeSources();
+  const bio = src.find((s) => /bio ?world/i.test(s.description));
+  if (bio) payOverrides[bio.key] = { days: [5, 20] };
+  const vacp = src.find((s) => /vacp|va comp|veterans|disability/i.test(s.description));
+  if (vacp) payOverrides[vacp.key] = { days: [1] };
+  savePayOverrides();
+  localStorage.setItem('seededPaySchedule', '1');
+}
+
+// Human summary of one source's pay schedule (for the editor).
+function payScheduleText(s) {
+  const ov = payOverrides[s.key];
+  if (ov?.days?.length) return `${ov.days.map(ordinal).join(' & ')} of each month`;
+  if (ov?.anchorDate) return `every ${cadenceDays(s.frequency) === 7 ? 'week' : '2 weeks'} from ${ov.anchorDate}`;
+  if (s.frequency === 'MONTHLY' || s.frequency === 'SEMI_MONTHLY') return payDaysOfMonth(s, s.frequency === 'SEMI_MONTHLY' ? 2 : 1).map(ordinal).join(' & ') + ' (detected)';
+  return `${FREQ_LABEL[s.frequency] || (s.frequency || '').toLowerCase()} (detected)`;
+}
+function ordinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+
+// Editable pay-schedule list — lets the user correct paydays the bank posts oddly.
+function renderPaySchedule() {
+  const box = $('#payScheduleList');
+  if (!box) return;
+  const sources = incomeSources();
+  if (!sources.length) { box.innerHTML = ''; return; }
+  box.innerHTML = sources.map((s, i) => `
+    <div class="recurring-row">
+      <span>💵 ${escapeHtml(shortName(s.description) || s.description)}</span>
+      <span class="freq">${payScheduleText(s)}</span>
+      <button class="ghost" data-payedit="${i}">Edit</button>
+    </div>`).join('');
+  box.querySelectorAll('[data-payedit]').forEach((b) => b.addEventListener('click', () => editPayday(sources[+b.dataset.payedit])));
+}
+function editPayday(s) {
+  if (s.frequency === 'WEEKLY' || s.frequency === 'BIWEEKLY') {
+    const cur = payOverrides[s.key]?.anchorDate || s.lastDate || '';
+    const v = (prompt(`When is the NEXT ${escapeHtml(s.description)} payday? (YYYY-MM-DD)`, cur) || '').trim();
+    if (v && /^\d{4}-\d{2}-\d{2}$/.test(v)) { payOverrides[s.key] = { anchorDate: v }; savePayOverrides(); render(); }
+  } else {
+    const cur = (payOverrides[s.key]?.days || payDaysOfMonth(s, 2)).join(',');
+    const v = (prompt(`Which day(s) of the month does ${escapeHtml(s.description)} pay? (e.g. 5,20)`, cur) || '').trim();
+    const days = v.split(/[,\s]+/).map((x) => parseInt(x, 10)).filter((x) => x >= 1 && x <= 31);
+    if (days.length) { payOverrides[s.key] = { days }; savePayOverrides(); render(); }
+  }
+}
+
 // Project paycheck dates within [start,end] from detected income sources.
 function projectPaydays(start, end) {
   const out = [];
   for (const s of incomeSources()) {
     const per = Math.abs(s.amount || s.monthlyAmount || 0); // Plaid stores inflows negative
     if (!per) continue;
-    const cad = cadenceDays(s.frequency);
-    let anchor = s.nextDate ? new Date(s.nextDate + 'T00:00:00') : (s.lastDate ? new Date(s.lastDate + 'T00:00:00') : null);
-    if (!anchor || isNaN(anchor.getTime())) continue;
-    while (anchor > start) anchor = new Date(anchor.getTime() - cad * 86400000);
-    for (let d = new Date(anchor); d <= end; d = new Date(d.getTime() + cad * 86400000)) {
-      if (d >= start) out.push({ date: new Date(d), amount: per, name: s.description });
+
+    if (s.frequency === 'MONTHLY' || s.frequency === 'SEMI_MONTHLY') {
+      // Fixed day(s) of the month, from real deposit history.
+      const doms = payDaysOfMonth(s, s.frequency === 'SEMI_MONTHLY' ? 2 : 1);
+      if (!doms.length) continue;
+      let m = new Date(start.getFullYear(), start.getMonth(), 1);
+      const lastM = new Date(end.getFullYear(), end.getMonth(), 1);
+      while (m <= lastM) {
+        const dim = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+        for (const dom of doms) {
+          const day = new Date(m.getFullYear(), m.getMonth(), Math.min(dom, dim));
+          if (day >= start && day <= end) out.push({ date: day, amount: per, name: s.description });
+        }
+        m = new Date(m.getFullYear(), m.getMonth() + 1, 1);
+      }
+    } else {
+      // Weekly/biweekly: step by cadence from an anchor (user override, else last deposit).
+      const cad = cadenceDays(s.frequency);
+      const ov = payOverrides[s.key]?.anchorDate;
+      let anchor = ov ? new Date(ov + 'T00:00:00')
+        : s.lastDate ? new Date(s.lastDate + 'T00:00:00')
+          : (s.nextDate ? new Date(s.nextDate + 'T00:00:00') : null);
+      if (!anchor || isNaN(anchor.getTime())) continue;
+      while (anchor > start) anchor = new Date(anchor.getTime() - cad * 86400000);
+      for (let d = new Date(anchor); d <= end; d = new Date(d.getTime() + cad * 86400000)) {
+        if (d >= start) out.push({ date: new Date(d), amount: per, name: s.description });
+      }
     }
   }
   return out.sort((a, b) => a.date - b.date);
@@ -2068,6 +2164,7 @@ function renderBillCalendar() {
   }
   grid.innerHTML = heads + cells.join('');
 
+  renderPaySchedule();
   renderPaycheckPlan(paydays, bills, today);
 }
 
@@ -2197,9 +2294,9 @@ function renderDebts() {
     if (d.ytdInterestPaid != null) facts.push(`${fmt2(d.ytdInterestPaid)} interest paid YTD`);
     const factLine = facts.length ? `<div class="meta muted small">${facts.join(' · ')}</div>` : '';
     return `
-    <div class="debt clickable" data-detail="${d.id}" title="Click for details">
+    <div class="debt">
       <div>
-        <div class="name">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
+        <div class="name detail-link" data-detail="${d.id}" title="Click the name for details">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
         <div class="meta">
           <span class="pill">${d.autoDetected ? '🔍 auto-detected' : d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
           ${d.autoDetected ? '' : (d.type ? escapeHtml(d.type) : '')}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ ${d.estimated ? 'balance &amp; APR estimated — Edit to confirm' : `click Edit to set ${d.autoDetected ? 'balance &amp; APR' : `APR${d.minPayment ? '' : ' &amp; payment'}`}`}</span>` : ''}
@@ -2221,12 +2318,10 @@ function renderDebts() {
   list.innerHTML =
     `<div class="owner-header household"><span>${debts.length} debt${debts.length > 1 ? 's' : ''}</span><span>${fmt(total)}</span></div>` +
     debts.map(debtRow).join('');
-  list.querySelectorAll('[data-detail]').forEach((el) =>
-    el.addEventListener('click', (e) => {
-      if (e.target.closest('.row-actions')) return; // let Edit/✕ do their thing
-      openDebtDetail(el.dataset.detail);
-    })
-  );
+  // Only the debt NAME opens the detail popup — so clicking anywhere near the
+  // Edit/✕ buttons can't accidentally open a modal that blocks them.
+  list.querySelectorAll('.detail-link[data-detail]').forEach((el) =>
+    el.addEventListener('click', () => openDebtDetail(el.dataset.detail)));
   list.querySelectorAll('[data-edit]').forEach((b) =>
     b.addEventListener('click', () => openDialog(debts.find((d) => d.id === b.dataset.edit)))
   );
