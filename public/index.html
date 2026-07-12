@@ -27,6 +27,7 @@
       <nav class="side-card side-nav">
         <h3>Jump to</h3>
         <a href="#dashboardCard">🎯 Dashboard</a>
+        <a href="#gamePlanCard">🎯 Game plan</a>
         <a href="#debtsCard">💳 Debts (balances)</a>
         <a href="#incomeCard">💵 Income</a>
         <a href="#billsCard">🧾 Monthly payments</a>
@@ -75,6 +76,18 @@
           <div id="dashIncome"></div>
         </div>
       </div>
+    </section>
+
+    <!-- Paycheck-to-paycheck game plan -->
+    <section class="card" id="gamePlanCard" hidden>
+      <div class="row spread">
+        <h2>🎯 Your paycheck game plan</h2>
+        <button id="downloadPlanBtn" class="ghost" title="Save a printable snapshot of your current plan">⬇ Download plan</button>
+      </div>
+      <p class="muted small">Back-on-track rules tuned to your real pay schedule — this stays live as your data changes. Download a snapshot anytime.</p>
+      <div id="bufferStatus"></div>
+      <div id="paycheckJobs" style="margin-top:12px"></div>
+      <div id="gamePlanRule" style="margin-top:12px"></div>
     </section>
 
     <!-- Connect / data sources -->

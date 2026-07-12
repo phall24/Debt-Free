@@ -119,6 +119,7 @@ async function init() {
     render();
   });
   $('#useBudgetBtn')?.addEventListener('click', () => { $('#extra').value = monthlySurplus(); render(); });
+  $('#downloadPlanBtn')?.addEventListener('click', downloadPlan);
   $('#calPrev')?.addEventListener('click', () => { calMonthOffset--; renderBillCalendar(); });
   $('#calNext')?.addEventListener('click', () => { calMonthOffset++; renderBillCalendar(); });
   $('#addPlannedBtn')?.addEventListener('click', () => {
@@ -983,6 +984,11 @@ const plannedTotal = () => plannedExpenses.reduce((s, p) => s + (+p.amount || 0)
 let payOverrides = loadJSON('payOverrides', {});
 function savePayOverrides() { localStorage.setItem('payOverrides', JSON.stringify(payOverrides)); }
 
+// One-paycheck checking buffer target (advisor: build this before max-attacking
+// the 28% cards, so a tight pay period never causes an overdraft).
+let bufferTarget = loadJSON('bufferTarget', 5000);
+function saveBufferTarget() { localStorage.setItem('bufferTarget', JSON.stringify(bufferTarget)); }
+
 // Smart plan — the tool builds the attack order for you, encoding the advisor's
 // logic: knock out near-limit high-APR cards first (fast credit-score + interest
 // wins), then everything else strictly by interest rate. No manual ordering.
@@ -1703,6 +1709,7 @@ function render() {
   renderUntrackedDebts();
   renderDebts();
   renderAccounts();
+  renderGamePlan();
   renderBills();
   renderIncome();
   renderPaymentCalendar();
@@ -2988,6 +2995,150 @@ function monthlyByCategory() {
   }
   for (const k in byCat) byCat[k] /= months;
   return byCat;
+}
+
+// Paycheck-to-paycheck game plan: buffer tracker + a job for each paycheck +
+// the fridge rule. Turns the advisor's plan into something the app enforces.
+function renderGamePlan() {
+  const card = $('#gamePlanCard');
+  if (!card) return;
+  const sources = incomeSources();
+  if (!sources.length || !accounts.length) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0)
+    || accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const pct = Math.min(100, Math.round((checking / bufferTarget) * 100));
+  const built = checking >= bufferTarget * 0.9;
+  const col = built ? 'var(--accent)' : checking < bufferTarget * 0.3 ? 'var(--danger)' : 'var(--warn)';
+  $('#bufferStatus').innerHTML = `
+    <div class="row spread"><strong>🛡️ Checking buffer</strong><span class="muted small">goal: one paycheck's cushion</span></div>
+    <div class="bar-row" style="grid-template-columns:1fr 150px;margin-top:6px">
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${col}"></div></div>
+      <span class="bar-val" style="color:${col}">${fmt(checking)} / ${fmt(bufferTarget)}</span>
+    </div>
+    <p class="muted small" style="margin-top:4px">${built
+      ? '✅ Buffer built — safe to max-attack the 28% cards.'
+      : `Build this <strong>first</strong>, fed by ~${fmt(smallLeakMonthly())}/mo of small leaks. The ~6–8 week pause costs only tens of dollars in interest and ends the overdrafts.`}</p>`;
+
+  // Which day the auto payments hit, and how much.
+  const autoDoms = autoLoans().map((d) => d.dueDate).filter(Boolean).map((x) => new Date(x + 'T00:00:00').getDate());
+  const autoDom = autoDoms.length ? Math.min(...autoDoms) : null;
+  const autoTotal = autoLoans().reduce((s, d) => s + (d.minPayment || 0), 0);
+
+  // Build a per-payday list for a typical month and assign each a job.
+  const events = [];
+  for (const s of sources) {
+    const per = Math.abs(s.amount || s.monthlyAmount || 0);
+    if (s.frequency === 'MONTHLY' || s.frequency === 'SEMI_MONTHLY') {
+      for (const dom of payDaysOfMonth(s, s.frequency === 'SEMI_MONTHLY' ? 2 : 1)) events.push({ dom, per, name: s.description });
+    } else {
+      events.push({ biweekly: true, per, name: s.description });
+    }
+  }
+  events.sort((a, b) => (a.dom || 99) - (b.dom || 99));
+
+  const jobFor = (e) => {
+    if (e.biweekly) return { txt: 'Covers day-to-day spending between the big checks.', c: '' };
+    if (autoDom && e.dom < autoDom && autoDom - e.dom <= 7) return { txt: `🚗 <strong>HOLD</strong> — covers the ${fmt(autoTotal)} auto payments on the ${ordinal(autoDom)} + tops up your buffer. Do NOT send this one to debt.`, c: 'var(--warn)' };
+    if (!built) return { txt: '🛡️ Send the surplus to your checking buffer until it hits the goal.', c: '' };
+    return { txt: '⚔️ Attack the cards — extra goes to your top card (Marriott/Citi/Blue Cash).', c: 'var(--accent)' };
+  };
+
+  $('#paycheckJobs').innerHTML = events.map((e) => {
+    const j = jobFor(e);
+    return `<div class="recurring-row">
+      <span>💵 <strong>${e.biweekly ? 'Every 2 weeks' : ordinal(e.dom)}</strong> · ${escapeHtml(shortName(e.name) || e.name)}</span>
+      <span class="bar-val">${fmt(e.per)}</span>
+      <span class="freq" style="text-align:right;${j.c ? `color:${j.c}` : ''}">${j.txt}</span>
+    </div>`;
+  }).join('');
+
+  $('#gamePlanRule').innerHTML = `<div class="rec info" style="grid-template-columns:1fr"><div class="rec-main">
+    <div class="rec-title">📏 The rule (tape it to the fridge)</div>
+    <div class="rec-detail muted small">Keep <strong>${fmt(bufferTarget)}</strong> in checking. The <strong>${autoDom ? ordinal(autoDom - 1) : '20th'} paycheck rides the autos</strong> — never send it to debt until they clear. Attack the cards with your other checks. Your wife's full-time income, when it starts, goes to buffer-then-cards, not lifestyle.</div>
+  </div></div>`;
+}
+
+// Download a printable snapshot of the CURRENT plan (built live at click time,
+// so it always reflects the latest data). The in-app plan itself stays live.
+function downloadPlan() {
+  const html = buildPlanHtml();
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `debt-free-plan-${todayISO()}.html`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('Plan downloaded — open it to print or save as PDF.');
+}
+
+function buildPlanHtml() {
+  const money = (n) => '$' + Math.round(n).toLocaleString('en-US');
+  const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0)
+    || accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const income = verifiedMonthlyIncome();
+  const living = monthlyExpenses();
+  const allMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
+  const free = monthlySurplus();
+  const totalDebt = debts.reduce((s, d) => s + (d.balance || 0), 0);
+  const autoTotal = autoLoans().reduce((s, d) => s + (d.minPayment || 0), 0);
+  const autoDoms = autoLoans().map((d) => d.dueDate).filter(Boolean).map((x) => new Date(x + 'T00:00:00').getDate());
+  const autoDom = autoDoms.length ? Math.min(...autoDoms) : 20;
+  const ordered = smartOrder(attackableDebts());
+  const rows = ordered.map((d, i) => `<tr><td>${i + 1}</td><td>${escapeHtml(d.name)}</td><td>${(d.apr || 0).toFixed(2)}%</td><td>${money(d.balance)}${d.estimated ? ' <em>(est.)</em>' : ''}</td></tr>`).join('');
+
+  // Per-paycheck jobs
+  const events = [];
+  for (const s of incomeSources()) {
+    const per = Math.abs(s.amount || s.monthlyAmount || 0);
+    if (s.frequency === 'MONTHLY' || s.frequency === 'SEMI_MONTHLY') {
+      for (const dom of payDaysOfMonth(s, s.frequency === 'SEMI_MONTHLY' ? 2 : 1)) events.push({ dom, per, name: s.description });
+    } else events.push({ biweekly: true, per, name: s.description });
+  }
+  events.sort((a, b) => (a.dom || 99) - (b.dom || 99));
+  const built = checking >= bufferTarget * 0.9;
+  const jobs = events.map((e) => {
+    let job;
+    if (e.biweekly) job = 'Covers day-to-day spending between checks.';
+    else if (e.dom < autoDom && autoDom - e.dom <= 7) job = `HOLD — covers the ${money(autoTotal)} auto payments on the ${ordinal(autoDom)} + tops up buffer. Not to debt.`;
+    else if (!built) job = 'Surplus → checking buffer until goal reached.';
+    else job = 'Attack the cards (extra to your top card).';
+    return `<tr><td>${e.biweekly ? 'Every 2 weeks' : ordinal(e.dom)}</td><td>${escapeHtml(shortName(e.name) || e.name)}</td><td>${money(e.per)}</td><td>${job}</td></tr>`;
+  }).join('');
+
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Debt-Free Plan — ${todayISO()}</title>
+<style>body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:780px;margin:28px auto;padding:0 18px;color:#161616;line-height:1.5}
+h1{margin:0 0 2px}h2{margin:22px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}
+.muted{color:#666;font-size:14px}.box{border:1px solid #e2e2e2;border-radius:10px;padding:12px 16px;margin:10px 0;background:#fafafa}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:14px}th,td{border:1px solid #e2e2e2;padding:7px 9px;text-align:left}
+th{background:#f3f3f3}.big{font-size:1.5rem;font-weight:800}@media print{body{margin:0}.box{background:#fff}}</style></head>
+<body>
+<h1>💸 Debt-Free Plan</h1>
+<p class="muted">Generated ${todayISO()}. This is a snapshot — your live plan in the app updates automatically as balances and transactions change.</p>
+
+<h2>Where you stand</h2>
+<div class="box"><strong>Total debt:</strong> ${money(totalDebt)} &nbsp;·&nbsp; <strong>Take-home:</strong> ${money(income)}/mo &nbsp;·&nbsp; <strong>Free to accelerate:</strong> ${money(free)}/mo<br>
+<strong>Checking buffer:</strong> ${money(checking)} of ${money(bufferTarget)} goal</div>
+
+<h2>📏 The rule</h2>
+<div class="box">Keep <strong>${money(bufferTarget)}</strong> in checking. The <strong>${ordinal(autoDom - 1)} paycheck rides the autos</strong> (${money(autoTotal)}) — never send it to debt until they clear. Attack the cards with your other checks. When your wife's full-time income starts, it goes to buffer, then cards — not lifestyle.</div>
+
+<h2>💵 Each paycheck's job</h2>
+<table><tr><th>Payday</th><th>Source</th><th>Amount</th><th>What it does</th></tr>${jobs}</table>
+
+<h2>⚔️ Attack order (highest-impact first)</h2>
+<table><tr><th>#</th><th>Debt</th><th>APR</th><th>Balance</th></tr>${rows}</table>
+<p class="muted">Pay every minimum, then pile all free cash on #1 until it's gone — then roll that payment to #2 (the snowball effect).</p>
+
+<h2>Monthly money</h2>
+<div class="box">Income ${money(income)} − Living ${money(living)} − Debt minimums ${money(allMin)} = <span class="big">${money(free)}</span> free per month</div>
+
+<p class="muted">Generated by your Debt-Free app.</p>
+</body></html>`;
 }
 
 // Monthly bills (recurring cash-out) vs. total debt (balance owed) — two very
