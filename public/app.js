@@ -74,6 +74,7 @@ async function init() {
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
+  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) await pullRecurring(); render(); });
   $('#addManualBtn').addEventListener('click', () => openDialog());
   $('#restoreHiddenBtn').addEventListener('click', restoreHidden);
   $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
@@ -1525,6 +1526,7 @@ function simulate(inputDebts, strategy, extra, priorityId) {
 // Rendering
 // ===========================================================================
 function render() {
+  renderSidebar();
   renderDashboard();
   renderUntrackedDebts();
   renderDebts();
@@ -1601,6 +1603,56 @@ function renderUntrackedDebts() {
     localStorage.setItem('dismissedDebtHints', JSON.stringify(dismissedDebtHints));
     renderUntrackedDebts();
   }));
+}
+
+// ---- Sidebar (persistent at-a-glance rail) -----------------------------------
+function renderSidebar() {
+  const statsEl = $('#sideStats');
+  if (!statsEl) return;
+  const attack = attackableDebts();
+  const autos = autoLoans();
+  const attackBal = attack.reduce((s, d) => s + d.balance, 0);
+  const autoBal = autos.reduce((s, d) => s + d.balance, 0);
+  const assets = accounts.reduce((s, a) => s + (a.balance || 0), 0);
+
+  if (!attack.length && !autos.length && !assets) {
+    statsEl.innerHTML = '<p class="muted small">Connect a bank or add a debt to see your snapshot.</p>';
+    $('#sideNext').innerHTML = '';
+  } else {
+    const strategy = $('#strategy')?.value || 'avalanche';
+    const extra = parseFloat($('#extra')?.value) || 0;
+    const plan = attack.length ? simulate(attack, strategy, extra) : null;
+    const free = monthlySurplus();
+    const efMonths = monthlyExpenses() ? assets / monthlyExpenses() : null;
+    const row = (k, v, color) => `<div class="side-stat"><span class="k">${k}</span><span class="v" ${color ? `style="color:${color}"` : ''}>${v}</span></div>`;
+    statsEl.innerHTML =
+      row('Total debt', fmt(attackBal + autoBal), 'var(--danger)') +
+      row('To attack', fmt(attackBal)) +
+      (plan && !plan.stalled ? row('Cards free', monthsToDate(plan.months), 'var(--accent)') : '') +
+      row('Net worth', fmt(assets - attackBal - autoBal), assets - attackBal - autoBal >= 0 ? 'var(--accent)' : 'var(--danger)') +
+      (efMonths != null ? row('Emergency fund', `${efMonths.toFixed(1)} mo`, efMonths >= 1 ? 'var(--accent)' : 'var(--warn)') : '') +
+      row('Free to accelerate', `${fmt(free)}/mo`, 'var(--accent)');
+
+    // Next payment due — the single most urgent item.
+    const owed = debts.filter((d) => (d.balance || 0) > 0).map((d) => ({ d, due: nextDueDate(d) }))
+      .filter((x) => x.due && !isPaidThisMonth(x.d)).sort((a, b) => a.due - b.due);
+    const nextEl = $('#sideNext');
+    if (owed.length) {
+      const { d, due } = owed[0];
+      const n = daysUntil(due);
+      const color = n <= 5 || d.isOverdue ? 'var(--danger)' : n <= 10 ? 'var(--warn)' : 'var(--text)';
+      nextEl.innerHTML = `<div style="font-weight:700">${escapeHtml(d.name)}</div>
+        <div class="muted small" style="margin:2px 0">${due.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} · <span style="color:${color}">${d.isOverdue ? 'overdue' : n <= 0 ? 'due today' : `in ${n} days`}</span></div>
+        <div style="font-size:1.1rem;font-weight:700">${d.minPayment ? fmt2(d.minPayment) : '—'}</div>`;
+    } else {
+      nextEl.innerHTML = '<p class="muted small">Nothing due — all caught up. 🎉</p>';
+    }
+  }
+
+  const sync = $('#sideSync');
+  if (sync) sync.innerHTML = lastSyncedAt
+    ? `✅ Synced ${(() => { const s = Math.max(0, Math.round((Date.now() - new Date(lastSyncedAt)) / 1000)); return s < 60 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' hr ago'; })()}`
+    : 'Not synced yet';
 }
 
 // Auto/vehicle loans are big but low-APR — per the plan, we keep them at

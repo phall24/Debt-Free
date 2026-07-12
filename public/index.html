@@ -14,6 +14,32 @@
     <p class="tagline">Connect your accounts, see every debt, and find the fastest way out.</p>
   </header>
 
+  <div class="app-shell">
+    <aside id="sidebar">
+      <div class="side-card">
+        <h3>At a glance</h3>
+        <div id="sideStats"><p class="muted small">Connect a bank or add a debt to see your snapshot.</p></div>
+      </div>
+      <div class="side-card">
+        <h3>⏭ Next payment</h3>
+        <div id="sideNext"></div>
+      </div>
+      <nav class="side-card side-nav">
+        <h3>Jump to</h3>
+        <a href="#dashboardCard">🎯 Dashboard</a>
+        <a href="#debtsCard">💳 Debts</a>
+        <a href="#accountsCard">🏦 Accounts</a>
+        <a href="#planCard">🧭 Build plan</a>
+        <a href="#recsCard">🚀 Get out sooner</a>
+        <a href="#analyticsCard">📊 Analytics</a>
+        <a href="#budgetCard">💵 Budget</a>
+      </nav>
+      <div class="side-card">
+        <div id="sideSync" class="muted small"></div>
+        <button id="sideRefreshBtn" class="ghost" style="width:100%;margin-top:8px">↻ Refresh from banks</button>
+      </div>
+    </aside>
+
   <main>
     <!-- Tracking dashboard -->
     <section class="card" id="dashboardCard" hidden>
@@ -49,7 +75,7 @@
     </section>
 
     <!-- Connect / data sources -->
-    <section class="card">
+    <section class="card" id="debtsCard">
       <div class="row spread">
         <h2>Your debts</h2>
         <div class="actions">
@@ -71,7 +97,7 @@
     </section>
 
     <!-- Accounts & net worth -->
-    <section class="card">
+    <section class="card" id="accountsCard">
       <div class="row spread">
         <h2>🏦 Accounts &amp; net worth</h2>
         <div class="actions">
@@ -93,7 +119,7 @@
     </section>
 
     <!-- Plan controls -->
-    <section class="card">
+    <section class="card" id="planCard">
       <h2>Build your plan</h2>
       <div class="controls">
         <label>
@@ -172,7 +198,7 @@
     </section>
 
     <!-- Budget & cash flow -->
-    <section class="card">
+    <section class="card" id="budgetCard">
       <div class="row spread">
         <h2>📊 Budget &amp; cash flow</h2>
         <div class="actions">
@@ -243,6 +269,7 @@
       </div>
     </section>
   </main>
+  </div>
 
   <!-- Debt / account detail drill-down -->
   <dialog id="detailDialog">

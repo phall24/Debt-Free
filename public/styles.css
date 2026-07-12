@@ -29,13 +29,55 @@ header {
 header h1 { margin: 0; font-size: 2rem; }
 .tagline { color: var(--muted); margin: 4px 0 0; }
 
-main {
-  max-width: 820px;
+html { scroll-behavior: smooth; }
+
+/* Two-column app shell: sticky sidebar + main content. */
+.app-shell {
+  max-width: 1500px;
   margin: 0 auto;
-  padding: 16px;
+  padding: 20px clamp(16px, 3vw, 40px);
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+#sidebar {
+  width: 290px;
+  flex-shrink: 0;
+  position: sticky;
+  top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.side-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.side-card h3 { margin: 0 0 10px; font-size: 0.95rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.side-stat { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.side-stat:last-child { border-bottom: none; }
+.side-stat .k { color: var(--muted); font-size: 0.82rem; }
+.side-stat .v { font-weight: 700; font-size: 0.95rem; }
+.side-nav { display: flex; flex-direction: column; }
+.side-nav a { color: var(--text); text-decoration: none; padding: 7px 8px; border-radius: 8px; font-size: 0.9rem; }
+.side-nav a:hover { background: var(--card-2); }
+
+main {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* Stack the sidebar on top on narrower screens. */
+@media (max-width: 960px) {
+  .app-shell { flex-direction: column; }
+  #sidebar { position: static; width: 100%; flex-direction: row; flex-wrap: wrap; }
+  #sidebar .side-card { flex: 1; min-width: 220px; }
 }
 
 .card {
