@@ -85,6 +85,7 @@ async function init() {
     syncAutoDetectedDebts();
     inferDueDates();
     seedPaySchedule();
+    if (autoSmooth) autoSmoothPayments();
     // Default Smart plan funds itself from the (now-computable) free cash.
     if ($('#strategy').value === 'custom') $('#extra').value = monthlySurplus();
     render();
@@ -92,7 +93,7 @@ async function init() {
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
-  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) { await pullRecurring(); syncAutoDetectedDebts(); inferDueDates(); } render(); });
+  $('#sideRefreshBtn')?.addEventListener('click', async () => { await pullPlaidDebts(); if (plaidConfigured) { await pullRecurring(); syncAutoDetectedDebts(); inferDueDates(); if (autoSmooth) autoSmoothPayments(); } render(); });
   $('#addManualBtn').addEventListener('click', () => openDialog());
   $('#restoreHiddenBtn').addEventListener('click', restoreHidden);
   $('#uploadBtn').addEventListener('click', () => $('#statementFile').click());
@@ -1011,6 +1012,13 @@ function savePayOverrides() { localStorage.setItem('payOverrides', JSON.stringif
 // Costs (if given) flow into the month's spending and the cash-flow forecast.
 let calendarEvents = loadJSON('calendarEvents', []);
 function saveCalendarEvents() { localStorage.setItem('calendarEvents', JSON.stringify(calendarEvents)); }
+
+// "Pay ahead": map a bill occurrence → an earlier date it'll actually be paid.
+// Keyed by billId (name + original due date) → 'YYYY-MM-DD'. The calendar,
+// per-paycheck plan and forecast all move the bill to the early date.
+let earlyPayments = loadJSON('earlyPayments', {});
+function saveEarlyPayments() { localStorage.setItem('earlyPayments', JSON.stringify(earlyPayments)); }
+function billId(name, dueISO) { return `${name}|${dueISO}`; }
 
 // One-paycheck checking buffer target (advisor: build this before max-attacking
 // the 28% cards, so a tight pay period never causes an overdraft).
@@ -2245,7 +2253,7 @@ function projectPaydays(start, end) {
 
 // Bills occurring in [start,end]: debt payments (by due day-of-month) plus
 // recurring bills (utilities/subscriptions) on their charge day.
-function billOccurrences(start, end) {
+function billOccurrences(start, end, applyEarly = true) {
   const out = [];
   const place = (base, name, amount, extra) => {
     const dom = base.getDate();
@@ -2270,6 +2278,13 @@ function billOccurrences(start, end) {
     if (INTEREST_RE.test(s.description) || FEE_RE.test(s.description)) continue;
     const base = new Date(s.nextDate + 'T00:00:00');
     if (!isNaN(base.getTime())) place(base, shortName(s.description) || s.description, s.amount || s.monthlyAmount || 0, { autopay: true });
+  }
+  // Apply "pay ahead" — move a bill to the earlier date it'll actually be paid.
+  if (applyEarly) {
+    for (const b of out) {
+      const early = earlyPayments[billId(b.name, isoLocal(b.date))];
+      if (early) { b.dueDate = b.date; b.date = new Date(early + 'T00:00:00'); b.paidEarly = true; }
+    }
   }
   return out.sort((a, b) => a.date - b.date);
 }
@@ -2308,7 +2323,7 @@ function renderBillCalendar() {
     let html = `<div class="cal-day ${date.getTime() === today.getTime() ? 'today' : ''}"><div class="cal-daynum">${day}</div>`;
     for (const p of paydays.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-payday">💵 ${fmt(p.amount)}</div>`;
     for (const p of (payMarks[key] || [])) html += `<div class="cal-bill pay" title="Best day to pay ${escapeHtml(p.name)}">⭐ pay ${escapeHtml(shortName(p.name))}</div>`;
-    for (const b of bills.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-bill" title="${escapeHtml(b.name)} ${b.autopay ? 'charges' : 'due'}">${escapeHtml(shortName(b.name))} ${b.amount ? fmt(b.amount) : ''}</div>`;
+    for (const b of bills.filter((x) => isoLocal(x.date) === key)) html += `<div class="cal-bill" title="${escapeHtml(b.name)} ${b.paidEarly ? 'pre-paid (due ' + isoLocal(b.dueDate) + ')' : b.autopay ? 'charges' : 'due'}">${b.paidEarly ? '⏩ ' : ''}${escapeHtml(shortName(b.name))} ${b.amount ? fmt(b.amount) : ''}</div>`;
     for (const ev of calendarEvents.filter((e) => e.date === key)) html += `<div class="cal-appt" data-appt="${ev.id}" title="Click to remove: ${escapeHtml(ev.title)}">📌 ${escapeHtml(shortName(ev.title))}${ev.cost ? ' ' + fmt(ev.cost) : ''}</div>`;
     cells.push(html + '</div>');
   }
@@ -2337,7 +2352,7 @@ function renderPaycheckPlan(paydays, bills, today) {
         <strong>💵 ${fmtD(p.date)} paycheck — ${fmt(p.amount)}</strong>
         <span class="muted small">bills through ${fmtD(periodEnd)}</span>
       </div>
-      ${due.length ? due.map((b) => `<div class="recurring-row"><span>${b.autopay ? '🔁 ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · autopay' : ''}</span><span class="bar-val">${fmt(b.amount)}</span></div>`).join('') : '<p class="muted small">No bills due before your next check.</p>'}
+      ${due.length ? due.map((b) => `<div class="recurring-row"><span>${b.autopay ? '🔁 ' : b.paidEarly ? '⏩ ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · autopay' : b.paidEarly ? ' · pre-paid' : ''}</span><span class="bar-val">${fmt(b.amount)}</span></div>`).join('') : '<p class="muted small">No bills due before your next check.</p>'}
       <div class="recurring-row" style="font-weight:700;border-top:1px solid var(--border)">
         <span>Left for debt &amp; savings</span><span></span>
         <span class="bar-val" style="color:${left >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(left)}</span>
@@ -2416,6 +2431,22 @@ function renderCashflowForecast() {
       </div>${btn}</div></div>`;
   }
 
+  // Show what the auto-smoother pre-paid to keep you positive.
+  const moves = Object.entries(earlyPayments);
+  let smoothNote = '';
+  if (moves.length) {
+    const items = moves.map(([id, early]) => {
+      const name = id.split('|')[0];
+      return `${escapeHtml(shortName(name))} → ${new Date(early + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    });
+    smoothNote = `<div class="rec info" style="grid-template-columns:1fr;margin-top:10px"><div class="rec-main">
+      <div class="rec-title">🪄 I pre-paid ${moves.length} bill${moves.length > 1 ? 's' : ''} early to keep you positive</div>
+      <div class="rec-detail muted small">Scheduled from your flush checks instead of the due date: ${items.join(' · ')}. <button class="link" id="smoothOffBtn">Turn auto pre-pay off</button></div>
+    </div></div>`;
+  } else if (!autoSmooth) {
+    smoothNote = `<div class="muted small" style="margin-top:8px">Auto pre-pay is off. <button class="link" id="smoothOnBtn">Turn it on</button> to let me schedule bills early and smooth the month.</div>`;
+  }
+
   box.innerHTML = `
     <div class="stats">
       <div class="stat"><div class="key">Checking now</div><div class="value">${fmt(checking)}</div></div>
@@ -2425,7 +2456,11 @@ function renderCashflowForecast() {
     ${banner}
     <div class="cashflow-strip">${series.map((s) => `<div title="${fmtD(s.date)}: ${fmt(s.bal)}" style="flex:1;background:${s.bal < 0 ? 'var(--danger)' : s.bal < 500 ? 'var(--warn)' : 'var(--accent)'}"></div>`).join('')}</div>
     <div class="muted small" style="margin-top:4px">Each bar = one day, ${fmtD(today)} → ${fmtD(end)}. Green = healthy · amber = under $500 · red = negative.</div>
+    ${smoothNote}
     ${fix}`;
+
+  $('#smoothOffBtn')?.addEventListener('click', () => { autoSmooth = false; localStorage.setItem('autoSmooth', 'false'); earlyPayments = {}; saveEarlyPayments(); render(); });
+  $('#smoothOnBtn')?.addEventListener('click', () => { autoSmooth = true; localStorage.setItem('autoSmooth', 'true'); autoSmoothPayments(); render(); });
 
   // The fix button lowers the extra debt payment by the shortfall so you don't
   // over-commit cash you actually need to get through the pay period.
@@ -2544,6 +2579,61 @@ function renderSpendTrends() {
     const c = el.dataset.cat;
     openTxList(`${c} — spending`, transactions.filter((t) => t.amount < 0 && catOf(t) === c).sort((a, b) => (a.date < b.date ? 1 : -1)));
   }));
+}
+
+// Automatically pre-pay bills from flush paychecks so the projected balance
+// never dips below a small floor. The tool does the smoothing; the user just
+// follows it. Writes earlyPayments (all auto-managed).
+let autoSmooth = loadJSON('autoSmooth', true);
+function autoSmoothPayments() {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const end = new Date(today.getTime() + 45 * 86400000);
+  const paydays = projectPaydays(today, end);
+  const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0) || accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const dailyBurn = monthlyExpenses() / 30.4;
+  const rawBills = billOccurrences(today, end, false).filter((b) => !b.autopay && b.amount > 0 && b.date > today);
+  const FLOOR = 150;
+  const assign = {};
+
+  // Minimum projected balance given a set of early-pay assignments.
+  const minWith = (a) => {
+    let bal = checking, min = Infinity;
+    const eff = rawBills.map((b) => ({ amount: b.amount, date: a[billId(b.name, isoLocal(b.date))] ? new Date(a[billId(b.name, isoLocal(b.date))] + 'T00:00:00') : b.date }));
+    for (let d = new Date(today); d <= end; d = new Date(d.getTime() + 86400000)) {
+      const key = isoLocal(d);
+      bal -= dailyBurn;
+      for (const p of paydays.filter((x) => isoLocal(x.date) === key)) bal += p.amount;
+      for (const b of eff.filter((x) => isoLocal(x.date) === key)) bal -= b.amount;
+      if (bal < min) min = bal;
+    }
+    return min;
+  };
+
+  // Greedily accept a move ONLY if it raises the projected low. (Pre-paying can't
+  // fix a spend-driven drain, but it does fix a bill cluster stuck in a thin
+  // window before a paycheck — pay it from the prior flush check instead.)
+  let guard = 0;
+  while (guard++ < 60) {
+    const baseMin = minWith(assign);
+    if (baseMin >= FLOOR) break;
+    let best = null, bestMin = baseMin;
+    for (const b of rawBills) {
+      const id = billId(b.name, isoLocal(b.date));
+      if (assign[id]) continue;
+      // Try each payday within ~16 days before the due date as the pay date.
+      for (const p of paydays) {
+        const days = (b.date - p.date) / 86400000;
+        if (days <= 0 || days > 16) continue;
+        const trial = { ...assign, [id]: isoLocal(p.date) };
+        const m = minWith(trial);
+        if (m > bestMin + 1) { bestMin = m; best = { id, date: isoLocal(p.date) }; }
+      }
+    }
+    if (!best) break;
+    assign[best.id] = best.date;
+  }
+  earlyPayments = assign;
+  saveEarlyPayments();
 }
 
 function removeAppointment(id) {
