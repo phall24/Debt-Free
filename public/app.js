@@ -2160,6 +2160,49 @@ function editPayday(s) {
   }
 }
 
+// US federal bank holidays for a year (with weekend-observed dates), so paydays
+// that land on them shift to the prior business day like real payroll.
+const _holidayCache = {};
+function bankHolidays(year) {
+  if (_holidayCache[year]) return _holidayCache[year];
+  const iso = (m, d) => `${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  const nth = (month, weekday, n) => { // n-th given weekday of month (1-based)
+    const first = new Date(year, month - 1, 1).getDay();
+    const day = 1 + ((weekday - first + 7) % 7) + (n - 1) * 7;
+    return new Date(year, month - 1, day);
+  };
+  const last = (month, weekday) => {
+    const lastDay = new Date(year, month, 0);
+    const back = (lastDay.getDay() - weekday + 7) % 7;
+    return new Date(year, month - 1, lastDay.getDate() - back);
+  };
+  const set = new Set();
+  const add = (d) => set.add(isoLocal(d instanceof Date ? d : new Date(d + 'T00:00:00')));
+  // Fixed-date holidays + weekend-observed (bank closed on the observed day).
+  for (const [m, d] of [[1, 1], [6, 19], [7, 4], [11, 11], [12, 25]]) {
+    const date = new Date(year, m - 1, d);
+    add(date);
+    if (date.getDay() === 6) add(new Date(year, m - 1, d - 1)); // Sat → Fri
+    if (date.getDay() === 0) add(new Date(year, m - 1, d + 1)); // Sun → Mon
+  }
+  add(nth(1, 1, 3));   // MLK — 3rd Mon Jan
+  add(nth(2, 1, 3));   // Presidents — 3rd Mon Feb
+  add(last(5, 1));     // Memorial — last Mon May
+  add(nth(9, 1, 1));   // Labor — 1st Mon Sep
+  add(nth(10, 1, 2));  // Columbus — 2nd Mon Oct
+  add(nth(11, 4, 4));  // Thanksgiving — 4th Thu Nov
+  _holidayCache[year] = set;
+  return set;
+}
+// Shift a nominal payday earlier over weekends/holidays to the prior business day.
+function priorBusinessDay(date) {
+  let d = new Date(date);
+  while (d.getDay() === 0 || d.getDay() === 6 || bankHolidays(d.getFullYear()).has(isoLocal(d))) {
+    d = new Date(d.getTime() - 86400000);
+  }
+  return d;
+}
+
 // Project paycheck dates within [start,end] from detected income sources.
 function projectPaydays(start, end) {
   const out = [];
@@ -2176,8 +2219,9 @@ function projectPaydays(start, end) {
       while (m <= lastM) {
         const dim = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
         for (const dom of doms) {
-          const day = new Date(m.getFullYear(), m.getMonth(), Math.min(dom, dim));
-          if (day >= start && day <= end) out.push({ date: day, amount: per, name: s.description });
+          const nominal = new Date(m.getFullYear(), m.getMonth(), Math.min(dom, dim));
+          const paid = priorBusinessDay(nominal); // weekend/holiday → prior business day
+          if (paid >= start && paid <= end) out.push({ date: paid, amount: per, name: s.description });
         }
         m = new Date(m.getFullYear(), m.getMonth() + 1, 1);
       }
@@ -2191,7 +2235,8 @@ function projectPaydays(start, end) {
       if (!anchor || isNaN(anchor.getTime())) continue;
       while (anchor > start) anchor = new Date(anchor.getTime() - cad * 86400000);
       for (let d = new Date(anchor); d <= end; d = new Date(d.getTime() + cad * 86400000)) {
-        if (d >= start) out.push({ date: new Date(d), amount: per, name: s.description });
+        const paid = priorBusinessDay(d); // weekend/holiday → prior business day
+        if (paid >= start && paid <= end) out.push({ date: paid, amount: per, name: s.description });
       }
     }
   }
@@ -3132,28 +3177,20 @@ function renderGamePlan() {
   </div></div>`;
 }
 
-// Turn an HTML document string into a downloaded PDF (via html2pdf). Falls back
-// to downloading the HTML if the library didn't load.
-function downloadAsPdf(html, baseName) {
-  if (typeof html2pdf === 'undefined') {
-    const blob = new Blob([html], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${baseName}.html`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('Downloaded as HTML (open it and print → Save as PDF).');
-    return;
-  }
-  showToast('Building your PDF…');
-  html2pdf().set({
-    margin: 10,
-    filename: `${baseName}.pdf`,
-    image: { type: 'jpeg', quality: 0.98 },
-    html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
-    jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
-    pagebreak: { mode: ['css', 'legacy'] },
-  }).from(html, 'string').save();
+// Export plan content (a <style> block + body markup) as a PDF via the browser's
+// print-to-PDF — this gives perfect, selectable-text output with no blank pages
+// (html2canvas-based conversion was dropping content / adding blank leading pages).
+function downloadAsPdf(content, baseName) {
+  const w = window.open('', '_blank', 'width=840,height=1000');
+  if (!w) { showToast('Allow pop-ups for this site, then click download again to export the PDF.'); return; }
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(baseName)}</title>
+<style>@page{margin:14mm}html,body{margin:0}body{font-family:system-ui,-apple-system,Arial,sans-serif;color:#161616;line-height:1.45;max-width:760px;margin:0 auto;padding:8px}tr,.box{page-break-inside:avoid}</style>
+</head><body>${content}</body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => { try { w.print(); } catch (e) { /* user can print manually */ } }, 500);
+  showToast('Opening print view — choose "Save as PDF" as the destination.');
 }
 
 // Download a snapshot of the CURRENT plan as a PDF (built live at click time).
@@ -3195,13 +3232,11 @@ function buildPlanHtml() {
     return `<tr><td>${e.biweekly ? 'Every 2 weeks' : ordinal(e.dom)}</td><td>${escapeHtml(shortName(e.name) || e.name)}</td><td>${money(e.per)}</td><td>${job}</td></tr>`;
   }).join('');
 
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Debt-Free Plan — ${todayISO()}</title>
-<style>body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:780px;margin:28px auto;padding:0 18px;color:#161616;line-height:1.5}
-h1{margin:0 0 2px}h2{margin:22px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}
-.muted{color:#666;font-size:14px}.box{border:1px solid #e2e2e2;border-radius:10px;padding:12px 16px;margin:10px 0;background:#fafafa}
-table{border-collapse:collapse;width:100%;margin:8px 0;font-size:14px}th,td{border:1px solid #e2e2e2;padding:7px 9px;text-align:left}
-th{background:#f3f3f3}.big{font-size:1.5rem;font-weight:800}@media print{body{margin:0}.box{background:#fff}}</style></head>
-<body>
+  return `<style>
+h1{margin:0 0 2px;font-size:24px}h2{margin:20px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px;font-size:18px}
+.muted{color:#666;font-size:13px}.box{border:1px solid #e2e2e2;border-radius:10px;padding:12px 16px;margin:10px 0;background:#fafafa}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid #e2e2e2;padding:7px 9px;text-align:left}
+th{background:#f3f3f3}.big{font-size:22px;font-weight:800}</style>
 <h1>💸 Debt-Free Plan</h1>
 <p class="muted">Generated ${todayISO()}. This is a snapshot — your live plan in the app updates automatically as balances and transactions change.</p>
 
@@ -3222,8 +3257,7 @@ th{background:#f3f3f3}.big{font-size:1.5rem;font-weight:800}@media print{body{ma
 <h2>Monthly money</h2>
 <div class="box">Income ${money(income)} − Living ${money(living)} − Debt minimums ${money(allMin)} = <span class="big">${money(free)}</span> free per month</div>
 
-<p class="muted">Generated by your Debt-Free app.</p>
-</body></html>`;
+<p class="muted">Generated by your Debt-Free app.</p>`;
 }
 
 // Download a full monthly package: the calendar grid + a line-by-line budget
@@ -3272,13 +3306,11 @@ function downloadMonthlyPackage() {
   const catRows = Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([c, v]) => `<tr><td>${escapeHtml(c)}</td><td class="r out">${money(v)}</td></tr>`).join('');
   const totalSpent = Object.values(byCat).reduce((s, v) => s + v, 0);
 
-  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Monthly Package — ${monthName}</title>
-<style>body{font-family:system-ui,-apple-system,Arial,sans-serif;max-width:820px;margin:26px auto;padding:0 18px;color:#161616;line-height:1.45}
-h1{margin:0}h2{margin:22px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px}.muted{color:#666;font-size:13px}
-table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid #e2e2e2;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f3f3f3}
-.r{text-align:right}.in{color:#0a7d2c}.out{color:#b00}.cal td{height:66px;width:14.2%;font-size:11px}.cal b{color:#444}
-tfoot td,.tot{font-weight:700;background:#fafafa}@media print{body{margin:0}}</style></head>
-<body>
+  const html = `<style>
+h1{margin:0;font-size:23px}h2{margin:20px 0 6px;border-bottom:2px solid #eee;padding-bottom:4px;font-size:17px}.muted{color:#666;font-size:12px}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px}th,td{border:1px solid #e2e2e2;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f3f3f3}
+.r{text-align:right}.in{color:#0a7d2c}.out{color:#b00}table.cal td{height:60px;width:14.2%;font-size:10px}table.cal b{color:#444}
+.tot td,.tot{font-weight:700;background:#fafafa}</style>
 <h1>📦 Monthly Package — ${monthName}</h1>
 <p class="muted">Generated ${todayISO()}. Snapshot of your plan for this month; the live app stays current.</p>
 
@@ -3301,8 +3333,7 @@ ${apptSection}
 <tr><td>− Spending (actual)</td><td class="r out">${money(totalSpent)}</td></tr>
 <tr class="tot"><td>Left over</td><td class="r ${totalIn - totalSpent >= 0 ? 'in' : 'out'}">${money(totalIn - totalSpent)}</td></tr></table>
 
-<p class="muted">Generated by your Debt-Free app.</p>
-</body></html>`;
+<p class="muted">Generated by your Debt-Free app.</p>`;
 
   downloadAsPdf(html, `monthly-package-${ym}`);
 }
