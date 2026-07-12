@@ -184,6 +184,13 @@ app.get('/api/liabilities', async (req, res) => {
           minPayment: card.minimum_payment_amount ?? estimateMinPayment(acct?.balances?.current ?? 0),
           creditLimit: acct?.balances?.limit ?? null,
           dueDate: card.next_payment_due_date ?? null,
+          // Rich Plaid Liabilities fields we now surface instead of discarding:
+          isOverdue: card.is_overdue ?? false,
+          lastPayment: card.last_payment_amount ?? null,
+          lastPaymentDate: card.last_payment_date ?? null,
+          lastStatementBalance: card.last_statement_balance ?? null,
+          statementDate: card.last_statement_issue_date ?? null,
+          aprs: (card.aprs ?? []).map((a) => ({ type: a.apr_type, rate: a.apr_percentage, balance: a.balance_subject_to_apr })),
         });
       }
 
@@ -198,6 +205,12 @@ app.get('/api/liabilities', async (req, res) => {
           balance: accounts.find((a) => a.account_id === loan.account_id)?.balances?.current ?? 0,
           apr: loan.interest_rate_percentage ?? 0,
           minPayment: loan.minimum_payment_amount ?? 0,
+          dueDate: loan.next_payment_due_date ?? null,
+          isOverdue: loan.is_overdue ?? false,
+          lastPayment: loan.last_payment_amount ?? null,
+          lastPaymentDate: loan.last_payment_date ?? null,
+          expectedPayoffDate: loan.expected_payoff_date ?? null,
+          ytdInterestPaid: loan.ytd_interest_paid ?? null,
         });
       }
 
@@ -212,6 +225,11 @@ app.get('/api/liabilities', async (req, res) => {
           balance: accounts.find((a) => a.account_id === mort.account_id)?.balances?.current ?? 0,
           apr: mort.interest_rate?.percentage ?? 0,
           minPayment: mort.next_monthly_payment ?? 0,
+          dueDate: mort.next_payment_due_date ?? null,
+          isOverdue: mort.is_overdue ?? false,
+          lastPayment: mort.last_payment_amount ?? null,
+          lastPaymentDate: mort.last_payment_date ?? null,
+          ytdInterestPaid: mort.ytd_interest_paid ?? null,
         });
       }
 
@@ -247,7 +265,7 @@ app.get('/api/liabilities', async (req, res) => {
     }
   }
 
-  res.json({ debts, accounts: depositAccounts, errors });
+  res.json({ debts, accounts: depositAccounts, errors, syncedAt: new Date().toISOString() });
 });
 
 // Pull transactions across all linked institutions (requires Transactions product).
@@ -284,6 +302,65 @@ app.get('/api/transactions', async (req, res) => {
   }
   res.json({ transactions: txns, errors });
 });
+
+// Detected recurring streams (subscriptions/bills) and income, straight from
+// Plaid's recurring-transactions model — more reliable than guessing from raw
+// transactions. Powers the Recurring panel AND verified take-home income.
+app.get('/api/recurring', async (req, res) => {
+  if (!plaid) return res.status(400).json({ error: 'Plaid not configured. See README.' });
+  const tokens = loadTokens();
+  const outflows = [];
+  const inflows = [];
+  const errors = [];
+
+  for (const { access_token, owner = 'Me' } of tokens) {
+    try {
+      // Recurring detection keys off already-synced transactions; make sure
+      // sync has run at least once so the streams exist.
+      try { await plaid.transactionsSync({ access_token }); } catch { /* non-fatal */ }
+
+      const acctResp = await plaid.accountsGet({ access_token });
+      const account_ids = acctResp.data.accounts.map((a) => a.account_id);
+      const nameOf = (id) => acctResp.data.accounts.find((a) => a.account_id === id)?.name ?? 'Account';
+
+      const resp = await plaid.transactionsRecurringGet({ access_token, account_ids });
+      const normalize = (s, direction) => ({
+        owner,
+        direction,
+        description: s.merchant_name || s.description,
+        account: nameOf(s.account_id),
+        amount: s.average_amount?.amount ?? s.last_amount?.amount ?? 0,
+        lastAmount: s.last_amount?.amount ?? null,
+        frequency: s.frequency,
+        monthlyAmount: monthlyFromFrequency(s.average_amount?.amount ?? s.last_amount?.amount ?? 0, s.frequency),
+        category: s.personal_finance_category?.primary ?? null,
+        lastDate: s.last_date ?? null,
+        nextDate: s.predicted_next_date ?? null,
+        isActive: s.is_active !== false,
+        status: s.status ?? null,
+      });
+
+      for (const s of resp.data.outflow_streams ?? []) outflows.push(normalize(s, 'out'));
+      for (const s of resp.data.inflow_streams ?? []) inflows.push(normalize(s, 'in'));
+    } catch (err) {
+      const data = err.response?.data;
+      errors.push({ owner, error_code: data?.error_code, message: data?.error_message ?? err.message });
+    }
+  }
+  res.json({ outflows, inflows, errors });
+});
+
+// Normalize a per-charge amount to a monthly figure given Plaid's frequency enum.
+function monthlyFromFrequency(amount, frequency) {
+  const perMonth = {
+    WEEKLY: 52 / 12,
+    BIWEEKLY: 26 / 12,
+    SEMI_MONTHLY: 2,
+    MONTHLY: 1,
+    ANNUALLY: 1 / 12,
+  };
+  return Math.abs(amount) * (perMonth[frequency] ?? 1);
+}
 
 // Map Plaid's personal_finance_category to this app's simple categories.
 function mapPlaidCategory(primary) {

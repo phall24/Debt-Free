@@ -15,6 +15,39 @@
   </header>
 
   <main>
+    <!-- Tracking dashboard -->
+    <section class="card" id="dashboardCard" hidden>
+      <div class="row spread">
+        <h2>🎯 Debt-Free Dashboard</h2>
+        <span id="dashSync" class="muted small"></span>
+      </div>
+      <p class="muted small">Your command center. Focused on the credit cards &amp; loans you're attacking — auto loans stay at minimums in the background.</p>
+      <div id="dashKpis" class="stats"></div>
+      <div id="dashAlerts"></div>
+      <div class="analytics-grid" style="margin-top:16px">
+        <div class="chart-box">
+          <h3>✅ This month's payments</h3>
+          <p class="muted small">Check each off as you pay. Red = overdue or due within 5 days.</p>
+          <div id="dashChecklist"></div>
+        </div>
+        <div class="chart-box">
+          <h3>📉 Card utilization</h3>
+          <p class="muted small">Lenders like under 30%. These drop — and your score climbs — as you pay down.</p>
+          <div id="dashUtil"></div>
+        </div>
+        <div class="chart-box">
+          <h3>🔥 Attack progress</h3>
+          <p class="muted small">Your current avalanche target and what's next in line.</p>
+          <div id="dashAttack"></div>
+        </div>
+        <div class="chart-box">
+          <h3>💵 Income vs. target</h3>
+          <p class="muted small">What you bring in vs. what the plan needs — and your headroom to go faster.</p>
+          <div id="dashIncome"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- Connect / data sources -->
     <section class="card">
       <div class="row spread">
@@ -30,6 +63,7 @@
       </div>
       <div id="setupBanner" hidden></div>
       <p id="plaidStatus" class="muted small"></p>
+      <p id="syncStamp" class="muted small" hidden></p>
       <p class="muted small">Connect as many logins as you need — yours, your wife's, and joint accounts (even two logins at the same bank). Tag each with whose it is. Manual entry is available as a backup.</p>
       <div id="debtList" class="debt-list"></div>
       <p id="emptyState" class="muted">No debts yet. Connect a bank or add one manually to get started.</p>
@@ -47,6 +81,14 @@
       <div id="accountList" class="debt-list"></div>
       <p id="accountEmpty" class="muted">No accounts yet. Add your checking and savings to see your net worth.</p>
       <div id="netWorth"></div>
+    </section>
+
+    <!-- Upcoming payments / due dates -->
+    <section class="card" id="calendarCard" hidden>
+      <h2>📅 Upcoming payments</h2>
+      <p class="muted small">Never miss a minimum — a late payment means a fee, a rate hike, and a credit hit. Ordered by what's due next.</p>
+      <div id="dueAlerts"></div>
+      <div id="calendarList" class="debt-list"></div>
     </section>
 
     <!-- Plan controls -->
@@ -153,6 +195,19 @@
         <div class="stats" id="budgetStats"></div>
 
         <div id="insightCallouts"></div>
+
+        <div class="analytics-grid" style="margin-top:16px">
+          <div class="chart-box">
+            <h3>💵 Verified income</h3>
+            <p class="muted small">Your real take-home, detected from recurring deposits — the trustworthy base for how much you can throw at debt.</p>
+            <div id="incomePanel"></div>
+          </div>
+          <div class="chart-box">
+            <h3>💸 Interest &amp; fees you're paying</h3>
+            <p class="muted small">Money leaking straight out the door — interest charges and late/overdraft fees. Killing these is the fastest win.</p>
+            <div id="feeTracker"></div>
+          </div>
+        </div>
 
         <div class="analytics-grid" style="margin-top:16px">
           <div class="chart-box">

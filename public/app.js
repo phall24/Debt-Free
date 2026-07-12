@@ -7,6 +7,9 @@ let excludedKeys = loadExcluded();       // Plaid account_ids the user removed
 let debtOverrides = loadDebtOverrides(); // account_id -> edited fields (apr, payment…)
 let accounts = loadAccounts();           // checking/savings (assets)
 let transactions = loadTransactions();   // imported from CSV
+let recurringStreams = [];               // Plaid-detected recurring outflows (subscriptions/bills)
+let incomeStreams = [];                  // Plaid-detected recurring inflows (paychecks/income)
+let lastSyncedAt = null;                 // ISO timestamp of the last Plaid liabilities pull
 let plaidConfigured = false;
 let plaidEnv = 'sandbox';
 let oauthReady = false;
@@ -63,6 +66,10 @@ async function init() {
   if (plaidConfigured) await pullPlaidDebts();
 
   render();
+
+  // Recurring streams + verified income are slower to compute on Plaid's side;
+  // fetch them after the first paint so the page isn't blocked, then re-render.
+  if (plaidConfigured) pullRecurring().then(render);
 
   $('#connectBtn').addEventListener('click', connectBank);
   $('#refreshBtn').addEventListener('click', pullPlaidDebts);
@@ -196,7 +203,8 @@ async function finishLink(public_token, owner) {
 
 async function pullPlaidDebts() {
   try {
-    const { debts: pulled, accounts: pulledAccts = [], errors } = await fetch('/api/liabilities').then((r) => r.json());
+    const { debts: pulled, accounts: pulledAccts = [], errors, syncedAt } = await fetch('/api/liabilities').then((r) => r.json());
+    lastSyncedAt = syncedAt || null;
     // Replace all plaid-sourced debts/accounts, keep manually-added ones.
     // Skip any the user has explicitly removed (by Plaid account_id).
     debts = debts.filter((d) => d.source === 'manual');
@@ -305,11 +313,34 @@ async function pullPlaidTransactions() {
   }
 }
 
+// Pull Plaid's detected recurring streams: outflows (subscriptions/bills) and
+// inflows (paychecks → verified income). Non-fatal if the product isn't ready.
+async function pullRecurring() {
+  try {
+    const { outflows = [], inflows = [], errors } = await fetch('/api/recurring').then((r) => r.json());
+    // Keep the recurring panel focused on genuinely cuttable spend — drop
+    // transfers and loan/debt payments (those are already tracked as debts).
+    recurringStreams = outflows.filter((s) =>
+      s.isActive && s.category !== 'TRANSFER_OUT' && s.category !== 'LOAN_PAYMENTS');
+    // Plaid's recurring categories are noisy (paychecks land as FOOD/TRANSFER,
+    // and fees show up as inflows). Treat any active deposit as income UNLESS
+    // it's clearly a fee/interest charge or bank dividend noise.
+    incomeStreams = inflows.filter((s) =>
+      s.isActive && s.category !== 'BANK_FEES' &&
+      !INTEREST_RE.test(s.description) && !FEE_RE.test(s.description) && s.monthlyAmount >= 1);
+    if (errors?.length) console.warn('Plaid recurring errors:', errors);
+  } catch (err) {
+    console.error('pullRecurring failed:', err);
+  }
+}
+
 async function unlinkAll() {
   if (!confirm('Disconnect all linked banks? Your manually-added debts will stay.')) return;
   await fetch('/api/unlink_all', { method: 'POST' });
   debts = debts.filter((d) => d.source === 'manual');
   accounts = accounts.filter((a) => a.source !== 'plaid');
+  recurringStreams = [];
+  incomeStreams = [];
   excludedKeys.clear();
   saveExcluded();
   render();
@@ -1009,6 +1040,8 @@ function renderBudget() {
   renderCategoryChart(byCat, spending, months);
   renderMerchants(spendTx);
   renderRecurring();
+  renderIncome();
+  renderFeeTracker();
   renderTrendChart();
   renderTxList();
   $('#txCount').textContent = tx.length;
@@ -1109,7 +1142,36 @@ function recurringCharges() {
   return { list: recurring.slice(0, 10), total: recurring.reduce((s, r) => s + r.amount, 0) };
 }
 
+// Human label for a Plaid frequency enum.
+const FREQ_LABEL = { WEEKLY: 'weekly', BIWEEKLY: 'every 2 wks', SEMI_MONTHLY: 'twice/mo', MONTHLY: 'monthly', ANNUALLY: 'yearly' };
+
 function renderRecurring() {
+  // Prefer Plaid's detected recurring streams (filtered by the owner drill-down);
+  // fall back to the keyword heuristic when Plaid data isn't available.
+  const streams = recurringStreams.filter((s) => budgetFilter.owner === 'all' || (s.owner || 'Me') === budgetFilter.owner);
+
+  if (streams.length) {
+    const sorted = [...streams].sort((a, b) => b.monthlyAmount - a.monthlyAmount);
+    const total = sorted.reduce((s, r) => s + r.monthlyAmount, 0);
+    $('#recurringList').innerHTML =
+      `<div class="recurring-row" style="font-weight:600"><span>~${fmt(total)}/mo total</span><span class="muted small">Plaid-detected</span><span></span></div>` +
+      sorted.slice(0, 12).map((r) => {
+        const next = r.nextDate ? ` · next ${r.nextDate}` : '';
+        return `
+        <div class="recurring-row clickable" data-merchant="${escapeHtml(normalizeMerchant(r.description))}" title="Click to see these charges">
+          <span>${escapeHtml(r.description)}</span>
+          <span class="freq">${FREQ_LABEL[r.frequency] || (r.frequency || '').toLowerCase()}${next}</span>
+          <span class="bar-val">${fmt2(r.monthlyAmount)}/mo</span>
+        </div>`;
+      }).join('');
+    $('#recurringList').querySelectorAll('[data-merchant]').forEach((el) =>
+      el.addEventListener('click', () => {
+        const m = el.dataset.merchant;
+        openTxList(`${m} — recurring`, filteredTx().filter((t) => t.amount < 0 && normalizeMerchant(t.description) === m).sort((a, b) => (a.date < b.date ? 1 : -1)));
+      }));
+    return;
+  }
+
   const { list, total } = recurringCharges();
   if (!list.length) {
     $('#recurringList').innerHTML = '<p class="muted small">No recurring charges detected (need 2+ months of data).</p>';
@@ -1128,6 +1190,152 @@ function renderRecurring() {
       const m = el.dataset.merchant;
       openTxList(`${m} — recurring`, filteredTx().filter((t) => t.amount < 0 && normalizeMerchant(t.description) === m).sort((a, b) => (a.date < b.date ? 1 : -1)));
     }));
+}
+
+// ---- Verified income ---------------------------------------------------------
+// Take-home detected from actual recurring deposits. Plaid's recurring-stream
+// model is clean but lags a week+ and misses payers (it missed AURAOPS), so we
+// MERGE it with recurring deposits detected straight from the live transaction
+// feed. That keeps income current and complete.
+// Money that lands in an account but ISN'T income: fees, interest, loan/LOC
+// proceeds (incl. Navy Federal NAVchek advances), refunds, reversals.
+// A card payment posts as a POSITIVE credit on the card's ledger — it's a debt
+// payment, not income. Plus fees, interest, loan/LOC proceeds, refunds.
+const INCOME_EXCLUDE_RE = /finance charge|interest|loan (proceed|disburse|deposit|advance)|navchek|\badvance\b|line of credit|refund|reversal|cash advance|crb rock|autopay|thank you|\bpymt\b|cardmember|card payment/i;
+// Internal moves between your own accounts — NOT income. We key off the
+// description, not Plaid's category, because Plaid mislabels payroll from some
+// processors (AURAOPS, VACP) as TRANSFER_IN.
+// Includes peer-to-peer apps (Venmo/Cash App/Zelle) — reimbursements between
+// people, not income. If you ever get PAID through one of these, tell me and
+// I'll whitelist that payer.
+const TRANSFER_RE = /\btransfer\b|\bxfer\b|to share|from share|to savings|from savings|to checking|from checking|trf (to|fr)|internal transfer|zelle|venmo|cash ?app|between accounts/i;
+
+// Recurring paychecks detected straight from transactions — catches what Plaid's
+// stream model misses (e.g. AURAOPS). Monthly is the AVERAGE of COMPLETE calendar
+// months (the current, partial month is excluded), which is robust to variable
+// pay and pay frequency without over/under-counting a partial period.
+function incomeFromTransactions() {
+  const thisMonth = new Date().toISOString().slice(0, 7); // exclude in-progress month
+  const g = {};
+  for (const t of filteredTx()) {
+    if (t.amount <= 0) continue;
+    // Decide by description, not Plaid's (often wrong) category.
+    if (TRANSFER_RE.test(t.description)) continue;             // money just moving
+    if (INCOME_EXCLUDE_RE.test(t.description)) continue;        // fees/loans/refunds
+    const key = normalizeMerchant(t.description);
+    (g[key] = g[key] || []).push(t);
+  }
+  const out = [];
+  for (const [key, items] of Object.entries(g)) {
+    // Total per calendar month, dropping the current (incomplete) month.
+    const byMonth = {};
+    for (const t of items) {
+      const m = t.date.slice(0, 7);
+      if (m === thisMonth) continue;
+      byMonth[m] = (byMonth[m] || 0) + t.amount;
+    }
+    const monthTotals = Object.values(byMonth);
+    if (monthTotals.length < 2) continue;                     // need 2+ full months
+    const monthly = monthTotals.reduce((s, v) => s + v, 0) / monthTotals.length;
+    if (monthly < 100) continue;                              // ignore trivial
+
+    // Infer cadence from the median gap between deposits → frequency + next date.
+    const dates = items.map((t) => t.date).sort();
+    const gaps = dates.slice(1).map((d, i) => (new Date(d) - new Date(dates[i])) / 86400000);
+    gaps.sort((a, b) => a - b);
+    const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 30;
+    const frequency = medGap <= 9 ? 'WEEKLY' : medGap <= 18 ? 'BIWEEKLY' : medGap <= 24 ? 'SEMI_MONTHLY' : 'MONTHLY';
+    const last = dates[dates.length - 1];
+    const next = new Date(last); next.setDate(next.getDate() + Math.round(medGap));
+    const nextDate = next.toISOString().slice(0, 10);
+
+    out.push({
+      key,
+      owner: items[0].owner || 'Me',
+      description: items[0].description,
+      frequency,
+      monthlyAmount: monthly,
+      lastDate: last,
+      nextDate: nextDate >= new Date().toISOString().slice(0, 10) ? nextDate : null,
+      detected: true, // from the live transaction feed, not a Plaid stream
+    });
+  }
+  return out;
+}
+
+// Merge Plaid income streams with transaction-detected recurring deposits,
+// deduping by normalized merchant (a payer Plaid already found isn't re-added).
+function incomeSources() {
+  const inOwner = (s) => budgetFilter.owner === 'all' || (s.owner || 'Me') === budgetFilter.owner;
+  const merged = incomeStreams
+    .filter((s) => inOwner(s) && !INCOME_EXCLUDE_RE.test(s.description) && !TRANSFER_RE.test(s.description))
+    .map((s) => ({ ...s, key: normalizeMerchant(s.description) }));
+  const seen = new Set(merged.map((s) => s.key));
+  for (const s of incomeFromTransactions()) {
+    if (inOwner(s) && !seen.has(s.key)) { merged.push(s); seen.add(s.key); }
+  }
+  return merged.sort((a, b) => b.monthlyAmount - a.monthlyAmount);
+}
+
+function verifiedMonthlyIncome() {
+  return incomeSources().reduce((s, r) => s + r.monthlyAmount, 0);
+}
+
+function renderIncome() {
+  const box = $('#incomePanel');
+  if (!box) return;
+  const sources = incomeSources();
+  if (!sources.length) {
+    box.innerHTML = '<p class="muted small">No verified income yet. Connect a checking account via Plaid (or import transactions) and I\'ll detect your paychecks automatically.</p>';
+    return;
+  }
+  const total = sources.reduce((s, r) => s + r.monthlyAmount, 0);
+  box.innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>${fmt(total)}/mo take-home</span><span class="muted small">verified</span><span></span></div>` +
+    sources.map((r) => {
+      const freq = FREQ_LABEL[r.frequency] || (r.frequency || '').toLowerCase();
+      const tag = r.nextDate ? ` · next ${r.nextDate}` : (r.detected ? ' · detected' : '');
+      return `
+      <div class="recurring-row">
+        <span>${escapeHtml(r.description)}</span>
+        <span class="freq">${freq}${tag}</span>
+        <span class="bar-val" style="color:var(--accent)">${fmt2(r.monthlyAmount)}/mo</span>
+      </div>`;
+    }).join('');
+}
+
+// ---- Interest & fee tracker --------------------------------------------------
+const INTEREST_RE = /interest charge|finance charge|purchase interest|interest assess|int charge|\binterest\b.*charg|apr charge/i;
+const FEE_RE = /late fee|overdraft|\bnsf\b|over.?limit|annual fee|returned (item|payment)|insufficient|service charge|maintenance fee|foreign transaction|over the credit|penalty/i;
+
+function feeBreakdown() {
+  let interest = 0, fees = 0;
+  const items = [];
+  for (const t of filteredTx()) {
+    if (t.amount >= 0) continue;
+    const amt = Math.abs(t.amount);
+    if (INTEREST_RE.test(t.description)) { interest += amt; items.push({ ...t, kind: 'Interest' }); }
+    else if (FEE_RE.test(t.description)) { fees += amt; items.push({ ...t, kind: 'Fee' }); }
+  }
+  const months = monthSpanOf(filteredTx());
+  return { interest, fees, total: interest + fees, monthly: (interest + fees) / months, months, items };
+}
+
+function renderFeeTracker() {
+  const box = $('#feeTracker');
+  if (!box) return;
+  const { interest, fees, total, monthly, items } = feeBreakdown();
+  if (!items.length) {
+    box.innerHTML = '<p class="muted small">No interest or fees found in your transactions — nice. (Import more history to be sure.)</p>';
+    return;
+  }
+  box.innerHTML = `
+    <div class="recurring-row" style="font-weight:600"><span style="color:var(--danger)">${fmt2(monthly)}/mo bleeding out</span><span class="muted small">${fmt(total)} total</span><span></span></div>
+    <div class="recurring-row"><span>Interest charges</span><span class="freq">${items.filter((i) => i.kind === 'Interest').length}×</span><span class="bar-val" style="color:var(--danger)">${fmt2(interest)}</span></div>
+    <div class="recurring-row"><span>Late / overdraft / other fees</span><span class="freq">${items.filter((i) => i.kind === 'Fee').length}×</span><span class="bar-val" style="color:var(--danger)">${fmt2(fees)}</span></div>
+    <button class="link" id="feeDetailBtn" style="margin-top:6px">See every charge →</button>`;
+  $('#feeDetailBtn')?.addEventListener('click', () =>
+    openTxList('Interest & fees', items.sort((a, b) => (a.date < b.date ? 1 : -1))));
 }
 
 function renderTrendChart() {
@@ -1275,12 +1483,243 @@ function simulate(inputDebts, strategy, extra, priorityId) {
 // Rendering
 // ===========================================================================
 function render() {
+  renderDashboard();
   renderDebts();
   renderAccounts();
+  renderPaymentCalendar();
   renderPlan();
   renderRecommendations();
   renderAnalytics();
   renderBudget();
+}
+
+// Auto/vehicle loans are big but low-APR — per the plan, we keep them at
+// minimums and DON'T let them drive the attack order or debt-free countdown.
+function isAutoLoan(d) {
+  return /vehicle|auto ?loan|\bcar\b/i.test(`${d.name} ${d.type || ''}`);
+}
+// The debts we actively attack: everything with a balance except auto loans.
+function attackableDebts() {
+  return debts.filter((d) => (d.balance || 0) > 0.5 && !isAutoLoan(d));
+}
+function autoLoans() {
+  return debts.filter((d) => (d.balance || 0) > 0.5 && isAutoLoan(d));
+}
+
+// Per-payment "paid this month" checklist state, keyed by debt + month.
+let paidThisMonth = loadJSON('paidThisMonth', {});
+function paidKey(d) { return `${d.account_id || d.name}|${new Date().toISOString().slice(0, 7)}`; }
+function togglePaid(d) {
+  const k = paidKey(d);
+  paidThisMonth[k] = !paidThisMonth[k];
+  localStorage.setItem('paidThisMonth', JSON.stringify(paidThisMonth));
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const card = $('#dashboardCard');
+  const attack = attackableDebts();
+  if (!attack.length && !autoLoans().length) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const strategy = $('#strategy')?.value || 'avalanche';
+  const extra = parseFloat($('#extra')?.value) || 0;
+  const plan = simulate(attack, strategy, extra);
+  const minOnly = simulate(attack, strategy, 0);
+
+  const attackBalance = attack.reduce((s, d) => s + d.balance, 0);
+  const autoBalance = autoLoans().reduce((s, d) => s + d.balance, 0);
+  const assets = accounts.reduce((s, a) => s + (a.balance || 0), 0);
+  const netWorth = assets - attackBalance - autoBalance;
+  const income = verifiedMonthlyIncome();
+  const { monthly: bleed } = feeBreakdown();
+
+  // ---- Hero KPIs -------------------------------------------------------------
+  const freeDate = plan.stalled ? 'stalled — raise payment' : plan.months <= 0 ? 'done!' : monthsToDate(plan.months);
+  const interestSaved = Math.max(0, minOnly.totalInterest - plan.totalInterest);
+  $('#dashKpis').innerHTML = `
+    <div class="stat"><div class="key">Debt to attack</div><div class="value" style="color:var(--danger)">${fmt(attackBalance)}</div></div>
+    <div class="stat"><div class="key">Cards debt-free</div><div class="value good">${freeDate}</div></div>
+    <div class="stat"><div class="key">Interest you'll save</div><div class="value good">${fmt(interestSaved)}</div></div>
+    <div class="stat"><div class="key">Net worth</div><div class="value ${netWorth >= 0 ? 'good' : ''}" style="${netWorth < 0 ? 'color:var(--danger)' : ''}">${fmt(netWorth)}</div></div>
+    <div class="stat"><div class="key">Bleeding to interest/fees</div><div class="value" style="color:var(--danger)">${fmt(bleed)}/mo</div></div>
+    ${autoBalance ? `<div class="stat"><div class="key">Auto loans (minimums)</div><div class="value muted">${fmt(autoBalance)}</div></div>` : ''}
+  `;
+
+  renderDashAlerts(attack);
+  renderDashChecklist();
+  renderDashUtil(attack);
+  renderDashAttack(plan, attack, strategy);
+  renderDashIncome(income, plan, extra);
+
+  const el = $('#dashSync');
+  if (el && lastSyncedAt) {
+    const secs = Math.max(0, Math.round((Date.now() - new Date(lastSyncedAt)) / 1000));
+    el.textContent = `synced ${secs < 60 ? 'just now' : secs < 3600 ? Math.round(secs / 60) + ' min ago' : Math.round(secs / 3600) + ' hr ago'}`;
+  }
+}
+
+// Turn "N months from now" into a friendly Month YYYY.
+function monthsToDate(months) {
+  const d = new Date(); d.setMonth(d.getMonth() + Math.ceil(months));
+  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
+function renderDashAlerts(attack) {
+  const alerts = [];
+  const overdue = attack.filter((d) => d.isOverdue);
+  if (overdue.length) alerts.push(`<div class="banner warn" style="border-color:var(--danger);color:var(--danger)">🚨 <strong>${overdue.length} account${overdue.length > 1 ? 's' : ''} past due</strong>: ${overdue.map((d) => escapeHtml(d.name)).join(', ')}. Pay now to stop fees + rate hikes.</div>`);
+  const overLimit = attack.filter((d) => d.creditLimit && d.balance / d.creditLimit >= 0.9);
+  if (overLimit.length) alerts.push(`<div class="banner warn">📉 <strong>${overLimit.length} card${overLimit.length > 1 ? 's' : ''} over 90% utilization</strong> (${overLimit.map((d) => escapeHtml(d.name)).join(', ')}) — knocking these down fastest boosts your credit score most.</div>`);
+  const noTerms = attack.filter((d) => !d.apr || d.needsTerms);
+  if (noTerms.length) alerts.push(`<div class="banner warn">⚙️ <strong>Confirm APR on ${noTerms.length} debt${noTerms.length > 1 ? 's' : ''}</strong> (${noTerms.map((d) => escapeHtml(d.name)).join(', ')}) so the plan is exact — click the debt → Edit.</div>`);
+  $('#dashAlerts').innerHTML = alerts.join('');
+}
+
+function renderDashChecklist() {
+  const owed = debts.filter((d) => (d.balance || 0) > 0);
+  const rows = owed
+    .map((d) => ({ d, due: nextDueDate(d) }))
+    .filter((x) => x.due && daysUntil(x.due) <= 31)
+    .sort((a, b) => a.due - b.due);
+  if (!rows.length) { $('#dashChecklist').innerHTML = '<p class="muted small">No payments due in the next 31 days.</p>'; return; }
+  const totalDue = rows.reduce((s, x) => s + (x.d.minPayment || 0), 0);
+  const paidCount = rows.filter((x) => paidThisMonth[paidKey(x.d)]).length;
+  $('#dashChecklist').innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>${paidCount}/${rows.length} paid</span><span class="muted small">${fmt(totalDue)} due</span><span></span></div>` +
+    rows.map(({ d, due }) => {
+      const n = daysUntil(due);
+      const paid = !!paidThisMonth[paidKey(d)];
+      const urgent = !paid && (d.isOverdue || n <= 5);
+      const when = due.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `<div class="recurring-row clickable" data-paid="${d.id}" title="Click to mark paid">
+        <span>${paid ? '✅' : (urgent ? '🔴' : '⬜')} <span style="${paid ? 'text-decoration:line-through;opacity:.6' : ''}">${escapeHtml(d.name)}</span></span>
+        <span class="freq" style="${urgent ? 'color:var(--danger)' : ''}">${when}${d.isOverdue ? ' · overdue' : ''}</span>
+        <span class="bar-val">${d.minPayment ? fmt2(d.minPayment) : '—'}</span>
+      </div>`;
+    }).join('');
+  $('#dashChecklist').querySelectorAll('[data-paid]').forEach((el) =>
+    el.addEventListener('click', () => togglePaid(debts.find((d) => d.id === el.dataset.paid))));
+}
+
+function renderDashUtil(attack) {
+  const cards = attack.filter((d) => d.creditLimit).sort((a, b) => (b.balance / b.creditLimit) - (a.balance / a.creditLimit));
+  if (!cards.length) { $('#dashUtil').innerHTML = '<p class="muted small">No credit-limit data yet.</p>'; return; }
+  const totalBal = cards.reduce((s, d) => s + d.balance, 0);
+  const totalLim = cards.reduce((s, d) => s + d.creditLimit, 0);
+  const overall = Math.round((totalBal / totalLim) * 100);
+  $('#dashUtil').innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>Overall ${overall}%</span><span class="muted small">${fmt(totalBal)} / ${fmt(totalLim)}</span><span></span></div>` +
+    cards.map((d) => {
+      const pct = Math.round((d.balance / d.creditLimit) * 100);
+      const color = pct >= 80 ? 'var(--danger)' : pct >= 30 ? 'var(--warn)' : 'var(--accent)';
+      return `<div class="bar-row" style="grid-template-columns:130px 1fr 44px">
+        <span class="bar-label">${escapeHtml(d.name.slice(0, 18))}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, pct)}%;background:${color}"></div></div>
+        <span class="bar-val" style="color:${color}">${pct}%</span>
+      </div>`;
+    }).join('');
+}
+
+function renderDashAttack(plan, attack, strategy) {
+  if (!attack.length) { $('#dashAttack').innerHTML = '<p class="muted small">No debts to attack. 🎉</p>'; return; }
+  const ordered = [...attack].sort((a, b) => strategy === 'avalanche' ? (b.apr - a.apr) : (a.balance - b.balance));
+  const target = ordered[0];
+  const nextUp = ordered.slice(1, 4);
+  $('#dashAttack').innerHTML = `
+    <div class="recurring-row" style="font-weight:600"><span>🎯 ${escapeHtml(target.name)}</span><span class="muted small">${(target.apr || 0).toFixed(2)}% APR</span><span class="bar-val">${fmt(target.balance)}</span></div>
+    <p class="muted small" style="margin:6px 0">Throw every extra dollar here until it's gone.</p>
+    ${nextUp.length ? '<div class="muted small" style="margin-bottom:4px">Next in line:</div>' + nextUp.map((d, i) =>
+      `<div class="recurring-row"><span>${i + 2}. ${escapeHtml(d.name)}</span><span class="freq">${(d.apr || 0).toFixed(2)}%</span><span class="bar-val">${fmt(d.balance)}</span></div>`).join('') : ''}`;
+}
+
+function renderDashIncome(income, plan, extra) {
+  const minTotal = attackableDebts().reduce((s, d) => s + (d.minPayment || 0), 0);
+  const autoMin = autoLoans().reduce((s, d) => s + (d.minPayment || 0), 0);
+  const target = minTotal + autoMin + extra;
+  const headroom = income - target;
+  const surplus = monthlySurplus();
+  const auraDown = incomeSources().some((s) => /aura/i.test(s.description));
+  $('#dashIncome').innerHTML = `
+    <div class="recurring-row" style="font-weight:600"><span>${fmt(income)}/mo income</span><span class="muted small">verified</span><span></span></div>
+    <div class="recurring-row"><span>Plan needs (mins + extra)</span><span></span><span class="bar-val">${fmt(target)}/mo</span></div>
+    <div class="recurring-row"><span>Headroom to go faster</span><span></span><span class="bar-val" style="color:${headroom >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(headroom)}/mo</span></div>
+    ${surplus > extra ? `<p class="muted small" style="margin-top:6px">💡 Your spending leaves ~${fmt(surplus)}/mo — you could raise your extra payment from ${fmt(extra)} toward that.</p>` : ''}
+    ${auraDown ? `<p class="muted small">📌 AURAOPS income has been trending down — plan is built on the recent average. Your wife's move to full-time at Royse City ISD will add headroom automatically as it posts.</p>` : ''}`;
+}
+
+// ---- Upcoming payments calendar + missed-payment alerts ----------------------
+// A late payment is the #1 setback (fee + rate hike + credit hit), so surface
+// what's due next and flag any debt we can't track because it has no due date.
+function nextDueDate(debt) {
+  if (!debt.dueDate) return null;
+  const d = new Date(debt.dueDate + 'T00:00:00');
+  if (isNaN(d.getTime())) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  // Roll a monthly due date forward to its next occurrence if it's in the past.
+  while (d < today) d.setMonth(d.getMonth() + 1);
+  return d;
+}
+function daysUntil(date) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((date - today) / 86400000);
+}
+
+function renderPaymentCalendar() {
+  const card = $('#calendarCard');
+  const owed = debts.filter((d) => (d.balance || 0) > 0);
+  if (!owed.length) { card.hidden = true; return; }
+  card.hidden = false;
+
+  const scheduled = owed
+    .map((d) => ({ debt: d, due: nextDueDate(d) }))
+    .filter((x) => x.due)
+    .sort((a, b) => a.due - b.due);
+  const untracked = owed.filter((d) => !d.dueDate);
+
+  // Plaid explicitly flags overdue accounts — surface that first, it's authoritative.
+  const overdue = owed.filter((d) => d.isOverdue);
+  const alerts = [];
+  if (overdue.length) {
+    alerts.push(`<div class="banner warn" style="border-color:var(--danger);color:var(--danger)">🚨 <strong>${overdue.length} account${overdue.length > 1 ? 's are' : ' is'} past due</strong> per your bank (${overdue.map((d) => escapeHtml(d.name)).join(', ')}). Pay immediately to stop late fees and a rate hike.</div>`);
+  }
+
+  // Alert banner: overdue-soon count + anything we can't track.
+  const soon = scheduled.filter((x) => daysUntil(x.due) <= 7);
+  if (soon.length) {
+    const totalSoon = soon.reduce((s, x) => s + (x.debt.minPayment || 0), 0);
+    alerts.push(`<div class="banner warn"><strong>${soon.length} payment${soon.length > 1 ? 's' : ''} due within 7 days</strong> — about ${fmt(totalSoon)} in minimums. Don't miss them.</div>`);
+  }
+  if (untracked.length) {
+    alerts.push(`<div class="banner warn">⚠️ <strong>${untracked.length} debt${untracked.length > 1 ? 's have' : ' has'} no due date</strong> (${untracked.map((d) => escapeHtml(d.name)).join(', ')}). Add one so you don't miss a payment — click the debt to edit.</div>`);
+  }
+  $('#dueAlerts').innerHTML = alerts.join('');
+
+  if (!scheduled.length) {
+    $('#calendarList').innerHTML = '<p class="muted small">No due dates set yet. Add a due date on each debt (or connect via Plaid) to build your payment calendar.</p>';
+    return;
+  }
+
+  const badge = (n) => {
+    if (n < 0) return `<span style="color:var(--danger);font-weight:600">${-n}d overdue</span>`;
+    if (n === 0) return `<span style="color:var(--danger);font-weight:600">due today</span>`;
+    if (n <= 7) return `<span style="color:var(--warn);font-weight:600">in ${n}d</span>`;
+    return `<span class="muted">in ${n}d</span>`;
+  };
+  const totalMonth = scheduled.filter((x) => daysUntil(x.due) <= 31).reduce((s, x) => s + (x.debt.minPayment || 0), 0);
+
+  $('#calendarList').innerHTML =
+    `<div class="recurring-row" style="font-weight:600"><span>${fmt(totalMonth)} in minimums due next 31 days</span><span></span><span></span></div>` +
+    scheduled.map(({ debt, due }) => {
+      const n = daysUntil(due);
+      const when = due.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      return `
+      <div class="recurring-row">
+        <span>${escapeHtml(debt.name)} <span class="muted small">${escapeHtml(debt.owner || 'Me')}</span></span>
+        <span class="freq">${when} · ${badge(n)}</span>
+        <span class="bar-val">${debt.minPayment ? fmt2(debt.minPayment) : '—'}</span>
+      </div>`;
+    }).join('');
 }
 
 // Credit utilization label, colored by how high it is (lenders like < 30%).
@@ -1291,7 +1730,19 @@ function utilizationLabel(d) {
   return `<span style="color:${color}">${pct}% of ${fmt(d.creditLimit)} used</span>`;
 }
 
+// "Synced 3 min ago" — makes it obvious the numbers are live Plaid data, not stale.
+function renderSyncStamp() {
+  const el = $('#syncStamp');
+  if (!el) return;
+  if (!lastSyncedAt) { el.hidden = true; return; }
+  const secs = Math.max(0, Math.round((Date.now() - new Date(lastSyncedAt)) / 1000));
+  const ago = secs < 60 ? 'just now' : secs < 3600 ? `${Math.round(secs / 60)} min ago` : `${Math.round(secs / 3600)} hr ago`;
+  el.hidden = false;
+  el.innerHTML = `✅ Balances, statements &amp; payments synced live from your banks via Plaid · <strong>updated ${ago}</strong> · click ↻ Refresh anytime`;
+}
+
 function renderDebts() {
+  renderSyncStamp();
   const list = $('#debtList');
   list.innerHTML = '';
   $('#emptyState').hidden = debts.length > 0;
@@ -1311,14 +1762,23 @@ function renderDebts() {
     groups.get(owner).push(d);
   }
 
-  const debtRow = (d) => `
+  const debtRow = (d) => {
+    // Second line built from the rich Plaid Liabilities data we now keep:
+    // proves the connection is live and current.
+    const facts = [];
+    if (d.lastPayment && d.lastPaymentDate) facts.push(`Last paid ${fmt2(d.lastPayment)} on ${escapeHtml(d.lastPaymentDate)}`);
+    if (d.lastStatementBalance != null) facts.push(`statement ${fmt2(d.lastStatementBalance)}`);
+    if (d.ytdInterestPaid != null) facts.push(`${fmt2(d.ytdInterestPaid)} interest paid YTD`);
+    const factLine = facts.length ? `<div class="meta muted small">${facts.join(' · ')}</div>` : '';
+    return `
     <div class="debt clickable" data-detail="${d.id}" title="Click for details">
       <div>
-        <div class="name">${escapeHtml(d.name)}</div>
+        <div class="name">${escapeHtml(d.name)}${d.isOverdue ? ' <span class="pill" style="background:var(--danger);color:#fff">OVERDUE</span>' : ''}</div>
         <div class="meta">
           <span class="pill">${d.source === 'plaid' ? '🔗 ' + escapeHtml(d.institution || 'linked') : d.origin === 'statement' ? '📄 statement' : '✍️ manual'}</span>
           ${d.type ? escapeHtml(d.type) : ''}${d.creditLimit ? ` · ${utilizationLabel(d)}` : ''}${d.dueDate ? ` · due ${escapeHtml(d.dueDate)}` : ''}${d.paymentInferred ? ` · <span style="color:var(--accent-2)">payment auto-detected</span>` : ''}${d.needsTerms ? ` · <span style="color:var(--warn)">⚠️ click Edit to set APR${d.minPayment ? '' : ' &amp; payment'}</span>` : ''}
         </div>
+        ${factLine}
       </div>
       <div class="num"><span class="label">Balance</span>${fmt2(d.balance)}</div>
       <div class="num"><span class="label">APR</span>${d.apr.toFixed(2)}%</div>
@@ -1328,6 +1788,7 @@ function renderDebts() {
         <button class="ghost" data-del="${d.id}">✕</button>
       </div>
     </div>`;
+  };
 
   // Only show owner headers when there's more than one person.
   const multiOwner = groups.size > 1;
@@ -1719,11 +2180,16 @@ function renderRecommendations() {
   renderScenarioTable(strategy, extra, baseline);
 }
 
-// Average money left over each month, from imported transactions.
+// Average money left over each month. Prefers Plaid's verified paycheck income
+// (stable) over summing raw deposits (which include transfers/refunds), falling
+// back to transaction-derived income when no verified income is available.
 function monthlySurplus() {
   if (!transactions.length) return 0;
   const months = monthSpan();
-  const income = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const verified = verifiedMonthlyIncome();
+  const income = verified > 0
+    ? verified * months
+    : transactions.filter((t) => isFlowCat(catOf(t)) && t.amount > 0).reduce((s, t) => s + t.amount, 0);
   const spend = transactions.filter((t) => isFlowCat(catOf(t)) && t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
   return Math.max(0, Math.floor(((income - spend) / months) / 5) * 5);
 }
