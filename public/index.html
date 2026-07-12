@@ -27,12 +27,14 @@
       <nav class="side-card side-nav">
         <h3>Jump to</h3>
         <a href="#dashboardCard">🎯 Dashboard</a>
-        <a href="#debtsCard">💳 Debts</a>
+        <a href="#debtsCard">💳 Debts (balances)</a>
+        <a href="#billsCard">💵 Monthly payments</a>
+        <a href="#calendarCard">📅 Calendar</a>
         <a href="#accountsCard">🏦 Accounts</a>
         <a href="#planCard">🧭 Build plan</a>
         <a href="#recsCard">🚀 Get out sooner</a>
         <a href="#analyticsCard">📊 Analytics</a>
-        <a href="#budgetCard">💵 Budget</a>
+        <a href="#budgetCard">📊 Budget detail</a>
       </nav>
       <div class="side-card">
         <div id="sideSync" class="muted small"></div>
@@ -89,7 +91,7 @@
       <div id="setupBanner" hidden></div>
       <p id="plaidStatus" class="muted small"></p>
       <p id="syncStamp" class="muted small" hidden></p>
-      <p class="muted small">Connect as many logins as you need — yours, your wife's, and joint accounts (even two logins at the same bank). Tag each with whose it is. Manual entry is available as a backup.</p>
+      <p class="muted small"><strong>Debts = things with a balance you're paying off</strong> (cards, loans). This is what the payoff plan attacks. Each debt's <em>payment</em> shows up in <strong>Monthly payments</strong> below. Connect as many logins as you need; manual entry is a backup.</p>
       <div id="untrackedDebts"></div>
       <div id="debtList" class="debt-list"></div>
       <p id="emptyState" class="muted">No debts yet. Connect a bank or add one manually to get started.</p>
@@ -109,18 +111,18 @@
       <div id="netWorth"></div>
     </section>
 
-    <!-- Monthly bills vs. total debt -->
+    <!-- Monthly payments (cash out) vs. total debt (balances) -->
     <section class="card" id="billsCard" hidden>
       <div class="row spread">
-        <h2>🧾 Monthly bills &amp; budget</h2>
+        <h2>💳 Monthly payments</h2>
         <button id="addPlannedBtn" class="ghost">＋ Add a planned cost</button>
       </div>
-      <p class="muted small">Two different things: <strong>monthly bills</strong> are the cash that leaves every month; <strong>total debt</strong> is the balance you owe. Whatever's left after your real spending funds the payoff plan.</p>
+      <p class="muted small">What actually leaves your account each month. This is the <em>payment</em> side — your <strong>debt payments</strong> (which pay down the balances in the Debts section) plus your <strong>bills</strong> (utilities, subscriptions — no balance, just recurring). Whatever's left funds the payoff plan.</p>
       <div id="billsSummary" class="stats"></div>
       <div class="analytics-grid" style="margin-top:16px">
         <div class="chart-box">
           <h3>Where your monthly money goes</h3>
-          <p class="muted small">Fixed bills + debt minimums + planned costs, from your real spending.</p>
+          <p class="muted small">Debt payments + bills + planned costs, from your real spending.</p>
           <div id="billsBreakdown"></div>
         </div>
         <div class="chart-box">

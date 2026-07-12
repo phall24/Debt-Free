@@ -174,8 +174,7 @@ function renderSetupBanner() {
 // Plaid wiring
 // ===========================================================================
 async function connectBank() {
-  const owner = (prompt('Whose login is this? (e.g. Me, Wife, Joint)', 'Me') || '').trim();
-  if (owner === '') return; // cancelled
+  const owner = 'Me'; // household-wide — we don't track who a debt belongs to
 
   const { link_token, error } = await fetch('/api/create_link_token', { method: 'POST' }).then((r) => r.json());
   if (error) return alert('Could not start Plaid: ' + error);
@@ -2658,8 +2657,8 @@ function renderBills() {
   const free = Math.max(0, income - allOut);
 
   $('#billsSummary').innerHTML = `
-    <div class="stat"><div class="key">Total debt (owed)</div><div class="value" style="color:var(--danger)">${fmt(totalDebt)}</div></div>
-    <div class="stat"><div class="key">Monthly bills</div><div class="value">${fmt(monthlyBills)}/mo</div></div>
+    <div class="stat" title="Balances you owe — see the Debts section"><div class="key">Total debt (balances)</div><div class="value" style="color:var(--danger)">${fmt(totalDebt)}</div></div>
+    <div class="stat" title="Debt payments + fixed bills + planned costs"><div class="key">Monthly payments</div><div class="value">${fmt(monthlyBills)}/mo</div></div>
     <div class="stat"><div class="key">All monthly spending</div><div class="value">${fmt(allOut)}/mo</div></div>
     <div class="stat"><div class="key">Free after everything</div><div class="value good">${fmt(free)}/mo</div></div>`;
 
