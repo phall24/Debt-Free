@@ -2339,32 +2339,66 @@ function renderBillCalendar() {
 function renderPaycheckPlan(paydays, bills, today) {
   const box = $('#paycheckPlan');
   if (!box) return;
-  const upcoming = paydays.filter((p) => p.date >= today).slice(0, 4);
-  if (!upcoming.length) { box.innerHTML = '<p class="muted small">Connect income (or import transactions) and I\'ll map bills to each paycheck.</p>'; return; }
+  // Only REAL paychecks anchor a pay period — ignore tiny deposits (a $2
+  // dividend isn't a paycheck and would create a nonsensical period).
+  const real = paydays.filter((p) => p.date >= today && p.amount >= 100).sort((a, b) => a.date - b.date);
+  if (!real.length) { box.innerHTML = '<p class="muted small">Connect income (or import transactions) and I\'ll map bills to each paycheck.</p>'; return; }
   const checking = accounts.filter((a) => /check/i.test(a.type || '')).reduce((s, a) => s + (a.balance || 0), 0) || accounts.reduce((s, a) => s + (a.balance || 0), 0);
   const built = checking >= bufferTarget * 0.9;
-  box.innerHTML = upcoming.map((p, i) => {
-    const periodEnd = upcoming[i + 1] ? upcoming[i + 1].date : new Date(p.date.getTime() + cadenceDays('BIWEEKLY') * 86400000);
+
+  // The LEVEL version — flat monthly/weekly numbers you actually run off of.
+  const income = verifiedMonthlyIncome();
+  const debtMin = debts.reduce((s, d) => s + (d.minPayment || 0), 0);
+  const byCat = monthlyByCategory();
+  const fixedBills = ['Housing', 'Utilities', 'Insurance', 'Subscriptions'].reduce((s, c) => s + (byCat[c] || 0), 0);
+  const reserve = Math.min(2000, Math.max(0, monthlySurplus()));
+  const allowance = Math.max(0, income - debtMin - plannedTotal() - fixedBills - reserve);
+  const perWeek = Math.floor(allowance / 4.3 / 10) * 10;
+  const committed = debtMin + fixedBills + plannedTotal();
+  const leveled = `<div class="rec info" style="grid-template-columns:1fr;background:#14271a;border-color:#1f4427;margin-bottom:12px"><div class="rec-main">
+    <div class="rec-title">🎚️ Your LEVEL plan — run off these, not the checks below</div>
+    <table style="width:100%;font-size:0.92rem;margin-top:6px;color:var(--text)">
+      <tr><td>Money in</td><td style="text-align:right;font-weight:700">${fmt(income)}/mo</td></tr>
+      <tr><td>− Bills &amp; debt payments (automatic)</td><td style="text-align:right">${fmt(committed)}/mo</td></tr>
+      <tr><td><strong>Live on (steady)</strong></td><td style="text-align:right;color:var(--accent);font-weight:700">${fmt(allowance)}/mo · ${fmt(perWeek)}/wk</td></tr>
+      <tr><td><strong>Save → ${built ? 'cards' : 'buffer'}</strong></td><td style="text-align:right;color:var(--accent);font-weight:700">${fmt(reserve)}/mo</td></tr>
+    </table>
+    <div class="muted small" style="margin-top:6px">The checks below are uneven — some short, some flush. That's normal. The buffer covers the timing so your spending stays flat at <strong>${fmt(perWeek)}/week</strong> no matter which check just landed.</div>
+  </div></div>
+  <div class="muted small" style="margin:4px 0 6px"><strong>The actual timing</strong> (uneven — the buffer smooths it):</div>`;
+
+  let running = checking; // carry balance forward, starting from today's checking
+  const dailyBurn = monthlyExpenses() / 30.4;
+  box.innerHTML = leveled + real.slice(0, 4).map((p, i) => {
+    // Period ends at the NEXT real paycheck (from the full list, so the last
+    // shown period doesn't vacuum up every future bill).
+    const periodEnd = real[i + 1] ? real[i + 1].date : new Date(p.date.getTime() + cadenceDays('BIWEEKLY') * 86400000);
     const due = bills.filter((b) => b.date >= p.date && b.date < periodEnd);
     const dueTotal = due.reduce((s, b) => s + b.amount, 0);
-    const left = p.amount - dueTotal;
+    const periodDays = Math.max(1, Math.round((periodEnd - p.date) / 86400000));
+    const living = dailyBurn * periodDays;
+    const carriedIn = running;
+    const carryOut = carriedIn + p.amount - dueTotal - living;
+    running = carryOut;
     const fmtD = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    // What to DO with the leftover — matches the game plan.
     const hasAutos = due.some((b) => b.debt && isAutoLoan(b.debt));
     let action;
-    if (left <= 0) action = { txt: '⚠️ Fully committed — nothing left over this check.', c: 'var(--danger)' };
-    else if (hasAutos) action = { txt: `🚗 Keep the ${fmt(left)} in checking — this check carries your auto loans. Don't send it to debt.`, c: 'var(--warn)' };
-    else if (!built) action = { txt: `🛡️ Move the ${fmt(left)} to your buffer (until it hits ${fmt(bufferTarget)}).`, c: 'var(--accent)' };
-    else action = { txt: `⚔️ Send the ${fmt(left)} to your top card.`, c: 'var(--accent)' };
+    if (carryOut < 150) action = { txt: `⚠️ You'd run down to ${fmt(carryOut)} by ${fmtD(periodEnd)} — don't send anything to debt this check; keep it all as buffer. (This gap is why the buffer comes first.)`, c: 'var(--warn)' };
+    else if (hasAutos) action = { txt: `🚗 This check carries your auto loans — hold the ${fmt(carryOut)} in checking, don't send it to debt.`, c: 'var(--warn)' };
+    else if (!built) action = { txt: `🛡️ Keep ~${fmt(bufferTarget)} as your cushion; anything above that builds the buffer. Carrying ${fmt(carryOut)}.`, c: 'var(--accent)' };
+    else action = { txt: `⚔️ Keep your ${fmt(bufferTarget)} cushion, send the surplus to your top card. Carrying ${fmt(carryOut)}.`, c: 'var(--accent)' };
     return `<div class="chart-box" style="margin-bottom:10px">
       <div class="row spread">
-        <strong>💵 ${fmtD(p.date)} paycheck — ${fmt(p.amount)}</strong>
-        <span class="muted small">bills through ${fmtD(periodEnd)}</span>
+        <strong>💵 ${fmtD(p.date)} — ${fmt(p.amount)}</strong>
+        <span class="muted small">through ${fmtD(periodEnd)} · ${periodDays} days</span>
       </div>
-      ${due.length ? due.map((b) => `<div class="recurring-row"><span>${b.autopay ? '🔁 ' : b.paidEarly ? '⏩ ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · autopay' : b.paidEarly ? ' · pre-paid' : ''}</span><span class="bar-val">${fmt(b.amount)}</span></div>`).join('') : '<p class="muted small">No bills due before your next check.</p>'}
+      <div class="recurring-row"><span>Carried in from last check</span><span></span><span class="bar-val">${fmt(carriedIn)}</span></div>
+      <div class="recurring-row"><span>＋ This paycheck</span><span></span><span class="bar-val" style="color:var(--accent)">+${fmt(p.amount)}</span></div>
+      ${due.map((b) => `<div class="recurring-row"><span>− ${b.autopay ? '🔁 ' : b.paidEarly ? '⏩ ' : ''}${escapeHtml(b.name)}</span><span class="freq">${fmtD(b.date)}${b.autopay ? ' · auto' : b.paidEarly ? ' · pre-paid' : ''}</span><span class="bar-val" style="color:var(--danger)">−${fmt(b.amount)}</span></div>`).join('')}
+      <div class="recurring-row"><span>− Living (~${periodDays} days)</span><span></span><span class="bar-val" style="color:var(--danger)">−${fmt(living)}</span></div>
       <div class="recurring-row" style="font-weight:700;border-top:1px solid var(--border)">
-        <span>Left over</span><span></span>
-        <span class="bar-val" style="color:${left >= 0 ? 'var(--accent)' : 'var(--danger)'}">${fmt(left)}</span>
+        <span>💾 Carry to next check</span><span></span>
+        <span class="bar-val" style="color:${carryOut >= 150 ? 'var(--accent)' : 'var(--danger)'}">${fmt(carryOut)}</span>
       </div>
       <div class="muted small" style="margin-top:5px;color:${action.c}">${action.txt}</div>
     </div>`;
